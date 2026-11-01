@@ -159,5 +159,22 @@ class ExampleUnitTest {
             com.example.nostr.ExternalSiteLauncher.normalizeGatewayUrl(legacyBroken)
         )
     }
+
+    @Test
+    fun featuredCreatorPubkeyAndPublisherResolution_handlesNpubHexAndSearchTerms() {
+        val creatorNpub = NostrCrypto.DEFAULT_FEATURED_CREATOR_NPUB
+        val creatorHex = NostrCrypto.DEFAULT_FEATURED_CREATOR_PUBKEY_HEX
+
+        assertEquals("npub1s06cx40d060vq887lj8hj6hku5a6hzch5ylkzj03qv86dn02tqhs0wzl0d", creatorNpub)
+        assertEquals(64, creatorHex.length)
+        assertEquals(creatorNpub, NostrCrypto.encodeNpub(creatorHex))
+
+        assertEquals(creatorHex, NostrCrypto.resolvePubkeyHex(creatorNpub))
+        assertEquals(creatorHex, NostrCrypto.resolvePubkeyHex("nostr:$creatorNpub"))
+        assertEquals(creatorHex, NostrCrypto.resolvePubkeyHex(creatorHex.uppercase()))
+        org.junit.Assert.assertNull(NostrCrypto.resolvePubkeyHex("2048 link puzzle"))
+        org.junit.Assert.assertNull(NostrCrypto.resolvePubkeyHex(""))
+    }
 }
+
 

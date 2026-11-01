@@ -52,6 +52,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.InstalledAppletEntity
+import com.example.data.PublisherProfileEntity
 import com.example.data.ResolvedWebAsset
 import com.example.data.VaultAccountEntity
 import com.example.nostr.ExternalSiteLauncher
@@ -73,6 +74,8 @@ import org.json.JSONObject
 fun AppletRuntimeScreen(
     applet: InstalledAppletEntity,
     activeAccount: VaultAccountEntity?,
+    publisherProfile: PublisherProfileEntity? = null,
+    onInspectPublisher: ((String) -> Unit)? = null,
     resolveDocument: suspend (InstalledAppletEntity) -> String,
     resolveAsset: suspend (InstalledAppletEntity, String, Boolean, (String) -> String) -> ResolvedWebAsset?,
     onBridgeCall: suspend (InstalledAppletEntity, String, String, JSONObject) -> Any?,
@@ -126,10 +129,16 @@ fun AppletRuntimeScreen(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
+                    val pubCaption = publisherProfile?.bestName ?: PublisherProfileEntity.shortNpub(applet.authorNpub)
                     Text(
-                        text = activeAccount?.npub?.let { "Signer: ${it.take(12)}…" } ?: "Isolated Sandbox",
+                        text = buildString {
+                            if (pubCaption.isNotBlank()) append("By $pubCaption • ")
+                            append(activeAccount?.npub?.let { "Signer: ${it.take(10)}…" } ?: "Isolated Sandbox")
+                        },
                         style = MaterialTheme.typography.labelSmall,
-                        color = CyberMint
+                        color = CyberMint,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
@@ -245,20 +254,23 @@ fun AppletRuntimeScreen(
                     style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
                     color = BreWhite
                 )
+                PublisherProfileCard(
+                    profile = publisherProfile,
+                    authorPubkey = applet.authorPubkey,
+                    authorNpub = applet.authorNpub,
+                    onFilterByPublisher = onInspectPublisher?.let { fn ->
+                        { pk ->
+                            showBundleSheet = false
+                            fn(pk)
+                        }
+                    }
+                )
                 Text(
                     text = "Kind ${applet.kind} • d:${applet.dTag} • ${if (applet.isNsite) "NIP-5A Nsite" else "NIP-5D Napplet"}",
                     fontFamily = JetBrainsMonoFontFamily,
                     fontSize = 11.sp,
                     color = BreLightPink
                 )
-                if (applet.authorNpub.isNotBlank()) {
-                    Text(
-                        text = "Publisher: ${applet.authorNpub}",
-                        fontFamily = JetBrainsMonoFontFamily,
-                        fontSize = 11.sp,
-                        color = ZineBoneCream
-                    )
-                }
                 if (applet.indexSha256.isNotBlank()) {
                     Text(
                         text = "Index SHA-256: ${applet.indexSha256}",

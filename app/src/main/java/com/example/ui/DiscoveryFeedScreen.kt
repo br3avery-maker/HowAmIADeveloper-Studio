@@ -82,8 +82,10 @@ import com.example.data.GalleryCategory
 import com.example.data.InstalledAppletEntity
 import com.example.data.LauncherPrefs
 import com.example.data.LauncherViewMode
+import com.example.data.PublisherProfileEntity
 import com.example.data.StackedAppletGroup
 import com.example.nostr.ExternalSiteLauncher
+import com.example.nostr.NostrCrypto
 import com.example.nostr.NsiteSpamFilter
 import com.example.ui.theme.AmberSignal
 import com.example.ui.theme.BreBlack
@@ -105,13 +107,16 @@ import com.example.ui.theme.ZineBoneCream
 @Composable
 fun DiscoveryFeedScreen(
     initialTabIsNsites: Boolean,
+    initialPublisherPubkey: String? = null,
     launcherPrefs: LauncherPrefs = LauncherPrefs(),
+    publisherProfiles: Map<String, PublisherProfileEntity> = emptyMap(),
     stackedGroups: List<StackedAppletGroup> = emptyList(),
     catalogApplets: List<InstalledAppletEntity>,
     localCuratedCount: Int = 0,
     spamShieldEnabled: Boolean = true,
     blockedSpamCount: Int = 0,
     connectedRelays: Int = 0,
+    onLookupPublisher: (String) -> String? = { null },
     onToggleViewMode: () -> Unit = {},
     onToggleDiscoveryMode: () -> Unit = {},
     onToggleSpamShield: () -> Unit = {},
@@ -143,6 +148,28 @@ fun DiscoveryFeedScreen(
     var liveFeedTab by rememberSaveable { mutableIntStateOf(if (initialTabIsNsites) 1 else 0) }
     var searchQuery by rememberSaveable { mutableStateOf("") }
     var inspectedGroupId by rememberSaveable { mutableStateOf<String?>(null) }
+    var selectedPublisherPubkey by rememberSaveable(initialPublisherPubkey) {
+        mutableStateOf(initialPublisherPubkey?.trim()?.lowercase()?.takeIf { it.length == 64 })
+    }
+
+    val queryResolvedPubkeyHex = remember(searchQuery) {
+        NostrCrypto.resolvePubkeyHex(searchQuery)
+    }
+
+    LaunchedEffect(queryResolvedPubkeyHex) {
+        if (queryResolvedPubkeyHex != null) {
+            onLookupPublisher(queryResolvedPubkeyHex)
+        }
+    }
+
+    val activePublisherFilterHex = selectedPublisherPubkey ?: queryResolvedPubkeyHex
+
+    val selectPublisherAction: (String) -> Unit = { rawPk ->
+        val resolved = onLookupPublisher(rawPk) ?: NostrCrypto.resolvePubkeyHex(rawPk) ?: rawPk.lowercase()
+        if (resolved.length == 64) {
+            selectedPublisherPubkey = resolved
+        }
+    }
 
     val activeInspectedGroup = remember(stackedGroups, inspectedGroupId) {
         inspectedGroupId?.let { id ->
@@ -156,34 +183,50 @@ fun DiscoveryFeedScreen(
         derivedStateOf { stackedGroups.filter { it.isFeatured } }
     }
 
-    val filteredGroups by remember(stackedGroups, selectedCategory, searchQuery) {
+    val filteredGroups by remember(stackedGroups, selectedCategory, searchQuery, activePublisherFilterHex, publisherProfiles) {
         derivedStateOf {
             val q = searchQuery.trim()
             stackedGroups.filter { group ->
                 val catMatch = selectedCategory in group.categories
-                val queryMatch = q.isEmpty() || group.variants.any { v ->
-                    v.applet.title.contains(q, ignoreCase = true) ||
-                        v.applet.description.contains(q, ignoreCase = true) ||
-                        v.applet.dTag.contains(q, ignoreCase = true) ||
-                        v.applet.authorNpub.contains(q, ignoreCase = true)
+                val pubFilterMatch = activePublisherFilterHex == null || group.variants.any { v ->
+                    v.applet.authorPubkey.equals(activePublisherFilterHex, ignoreCase = true)
                 }
-                catMatch && queryMatch
+                val queryMatch = q.isEmpty() || queryResolvedPubkeyHex != null || group.variants.any { v ->
+                    val app = v.applet
+                    val prof = publisherProfiles[app.authorPubkey.lowercase()]
+                    app.title.contains(q, ignoreCase = true) ||
+                        app.description.contains(q, ignoreCase = true) ||
+                        app.dTag.contains(q, ignoreCase = true) ||
+                        app.authorNpub.contains(q, ignoreCase = true) ||
+                        app.authorPubkey.contains(q, ignoreCase = true) ||
+                        prof?.displayName?.contains(q, ignoreCase = true) == true ||
+                        prof?.username?.contains(q, ignoreCase = true) == true ||
+                        prof?.nip05?.contains(q, ignoreCase = true) == true
+                }
+                catMatch && pubFilterMatch && queryMatch
             }
         }
     }
 
-    val liveFeedItems by remember(catalogApplets, liveFeedTab, searchQuery) {
+    val liveFeedItems by remember(catalogApplets, liveFeedTab, searchQuery, activePublisherFilterHex, publisherProfiles) {
         derivedStateOf {
             val wantNsite = liveFeedTab == 1
             val q = searchQuery.trim()
             catalogApplets
                 .filter { item ->
-                    item.isNsite == wantNsite &&
-                        (q.isEmpty() ||
-                            item.title.contains(q, ignoreCase = true) ||
-                            item.description.contains(q, ignoreCase = true) ||
-                            item.dTag.contains(q, ignoreCase = true) ||
-                            item.authorNpub.contains(q, ignoreCase = true))
+                    val prof = publisherProfiles[item.authorPubkey.lowercase()]
+                    val pubFilterMatch = activePublisherFilterHex == null ||
+                        item.authorPubkey.equals(activePublisherFilterHex, ignoreCase = true)
+                    val queryMatch = q.isEmpty() || queryResolvedPubkeyHex != null ||
+                        item.title.contains(q, ignoreCase = true) ||
+                        item.description.contains(q, ignoreCase = true) ||
+                        item.dTag.contains(q, ignoreCase = true) ||
+                        item.authorNpub.contains(q, ignoreCase = true) ||
+                        item.authorPubkey.contains(q, ignoreCase = true) ||
+                        prof?.displayName?.contains(q, ignoreCase = true) == true ||
+                        prof?.username?.contains(q, ignoreCase = true) == true ||
+                        prof?.nip05?.contains(q, ignoreCase = true) == true
+                    item.isNsite == wantNsite && pubFilterMatch && queryMatch
                 }
                 .sortedByDescending { it.updatedAt }
         }
@@ -241,7 +284,7 @@ fun DiscoveryFeedScreen(
                     CompactSearchPill(
                         query = searchQuery,
                         onQueryChange = { searchQuery = it },
-                        placeholder = if (isGalleryMode) "Search gallery, d-tags…" else "Search live relay feed…",
+                        placeholder = stringResource(R.string.search_gallery_publishers_hint),
                         modifier = Modifier
                             .weight(1f)
                             .testTag("discovery_search_input")
@@ -344,7 +387,11 @@ fun DiscoveryFeedScreen(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // Telemetry & Curation Status Strip (Spam Shield + NIP-51 Sync + Relay Refresh)
+                val featuredCreatorHex = NostrCrypto.DEFAULT_FEATURED_CREATOR_PUBKEY_HEX
+                val featuredCreatorProfile = publisherProfiles[featuredCreatorHex]
+                val isFeaturedCreatorFiltered = activePublisherFilterHex?.equals(featuredCreatorHex, ignoreCase = true) == true
+
+                // Telemetry & Curation Status Strip (Featured Creator + Spam Shield + NIP-51 Sync + Relay Refresh)
                 GalleryStatusStrip(
                     isGalleryMode = isGalleryMode,
                     stackedCount = stackedGroups.size,
@@ -353,10 +400,42 @@ fun DiscoveryFeedScreen(
                     spamShieldEnabled = spamShieldEnabled,
                     blockedSpamCount = blockedSpamCount,
                     connectedRelays = connectedRelays,
+                    featuredCreatorLabel = featuredCreatorProfile?.takeIf { it.hasResolvedIdentity }?.bestName
+                        ?: "Creator Nsites",
+                    isFeaturedCreatorSelected = isFeaturedCreatorFiltered,
+                    onToggleFeaturedCreator = {
+                        if (isFeaturedCreatorFiltered) {
+                            selectedPublisherPubkey = null
+                            if (queryResolvedPubkeyHex != null) searchQuery = ""
+                        } else if (featuredCreatorHex.length == 64) {
+                            selectPublisherAction(featuredCreatorHex)
+                        }
+                    },
                     onToggleSpamShield = onToggleSpamShield,
                     onPublishNip51List = onPublishNip51List,
                     onRefresh = { onRefreshCatalog(false) }
                 )
+
+                if (activePublisherFilterHex != null) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    val pubProfile = publisherProfiles[activePublisherFilterHex]
+                    val fallbackNpub = remember(activePublisherFilterHex) {
+                        runCatching { NostrCrypto.encodeNpub(activePublisherFilterHex) }.getOrDefault(activePublisherFilterHex)
+                    }
+                    val authorAppsCount = remember(catalogApplets, activePublisherFilterHex) {
+                        catalogApplets.count { it.authorPubkey.equals(activePublisherFilterHex, ignoreCase = true) }
+                    }
+                    PublisherProfileCard(
+                        profile = pubProfile,
+                        authorPubkey = activePublisherFilterHex,
+                        authorNpub = fallbackNpub,
+                        appCount = authorAppsCount,
+                        onClearFilter = {
+                            selectedPublisherPubkey = null
+                            if (queryResolvedPubkeyHex != null) searchQuery = ""
+                        }
+                    )
+                }
 
                 Spacer(modifier = Modifier.height(8.dp))
 
@@ -416,25 +495,32 @@ fun DiscoveryFeedScreen(
 
                             if (filteredGroups.isEmpty()) {
                                 EmptyDiscoveryState(
-                                    isSearchActive = searchQuery.isNotBlank() || selectedCategory != GalleryCategory.ALL,
-                                    emptyTitle = if (selectedCategory == GalleryCategory.NIP51_CURATED) {
-                                        "No NIP-51 Curated Apps Yet"
-                                    } else {
-                                        "No matching gallery apps"
+                                    isSearchActive = searchQuery.isNotBlank() ||
+                                        selectedCategory != GalleryCategory.ALL ||
+                                        activePublisherFilterHex != null,
+                                    emptyTitle = when {
+                                        activePublisherFilterHex != null -> "Querying publisher Nsites & Kind 0…"
+                                        selectedCategory == GalleryCategory.NIP51_CURATED -> "No NIP-51 Curated Apps Yet"
+                                        else -> "No matching gallery apps"
                                     },
-                                    emptySubtitle = if (selectedCategory == GalleryCategory.NIP51_CURATED) {
-                                        "Tap any app tile and press the NIP-51 bookmark button to build & sign your own Kind 30003 curated gallery list."
-                                    } else {
-                                        "Clear filters or sync connected relays to pull additional NIP-5D & NIP-5A manifests."
+                                    emptySubtitle = when {
+                                        activePublisherFilterHex != null ->
+                                            "Connected relays and NIP-65 outbox relays are being queried for manifests signed by ${PublisherProfileEntity.shortNpub(runCatching { NostrCrypto.encodeNpub(activePublisherFilterHex) }.getOrDefault(activePublisherFilterHex))}."
+                                        selectedCategory == GalleryCategory.NIP51_CURATED ->
+                                            "Tap any app tile and press the NIP-51 bookmark button to build & sign your own Kind 30003 curated gallery list."
+                                        else ->
+                                            "Clear filters or sync connected relays to pull live NIP-5D & NIP-5A manifests."
                                     },
                                     onResetFilter = {
                                         searchQuery = ""
+                                        selectedPublisherPubkey = null
                                         selectedCategoryName = GalleryCategory.ALL.name
                                     },
                                     onRefresh = { onRefreshCatalog(false) }
                                 )
                             } else {
                                 val showSpotlight = searchQuery.isBlank() &&
+                                    activePublisherFilterHex == null &&
                                     (selectedCategory == GalleryCategory.ALL || selectedCategory == GalleryCategory.FEATURED) &&
                                     featuredGroups.isNotEmpty()
 
@@ -466,6 +552,8 @@ fun DiscoveryFeedScreen(
                                                         Column {
                                                             FeaturedSpotlightCarousel(
                                                                 featuredGroups = featuredGroups,
+                                                                publisherProfiles = publisherProfiles,
+                                                                onSelectPublisher = selectPublisherAction,
                                                                 onSelectGroup = { inspectedGroupId = it.groupId }
                                                             )
                                                             Spacer(modifier = Modifier.height(6.dp))
@@ -482,6 +570,7 @@ fun DiscoveryFeedScreen(
                                                 items(filteredGroups, key = { it.groupId }) { group ->
                                                     StackedGalleryGridTile(
                                                         group = group,
+                                                        publisherProfile = publisherProfiles[group.primary.authorPubkey.lowercase()],
                                                         onSelectGroup = { inspectedGroupId = group.groupId },
                                                         onQuickLaunchPrimary = { onOpenApplet(group.primary) }
                                                     )
@@ -501,6 +590,8 @@ fun DiscoveryFeedScreen(
                                                     item(key = "spotlight_list_header") {
                                                         FeaturedSpotlightCarousel(
                                                             featuredGroups = featuredGroups,
+                                                            publisherProfiles = publisherProfiles,
+                                                            onSelectPublisher = selectPublisherAction,
                                                             onSelectGroup = { inspectedGroupId = it.groupId }
                                                         )
                                                     }
@@ -509,7 +600,9 @@ fun DiscoveryFeedScreen(
                                                 items(filteredGroups, key = { it.groupId }) { group ->
                                                     StackedGalleryListCard(
                                                         group = group,
+                                                        publisherProfile = publisherProfiles[group.primary.authorPubkey.lowercase()],
                                                         openNsitesExternally = launcherPrefs.openNsitesExternally,
+                                                        onSelectPublisher = selectPublisherAction,
                                                         onSelectGroup = { inspectedGroupId = group.groupId },
                                                         onQuickInstallOrOpen = {
                                                             if (group.primary.isInstalled) {
@@ -534,10 +627,15 @@ fun DiscoveryFeedScreen(
                             nappletCount = catalogApplets.count { !it.isNsite },
                             nsiteCount = catalogApplets.count { it.isNsite },
                             items = liveFeedItems,
+                            publisherProfiles = publisherProfiles,
                             openNsitesExternally = launcherPrefs.openNsitesExternally,
-                            isSearchActive = searchQuery.isNotBlank(),
-                            onClearSearch = { searchQuery = "" },
+                            isSearchActive = searchQuery.isNotBlank() || activePublisherFilterHex != null,
+                            onClearSearch = {
+                                searchQuery = ""
+                                selectedPublisherPubkey = null
+                            },
                             onRefresh = { onRefreshCatalog(false) },
+                            onSelectPublisher = selectPublisherAction,
                             onInstallToggle = onInstallToggle,
                             onOpenApplet = onOpenApplet,
                             onForkToStudio = onForkToStudio
@@ -551,7 +649,9 @@ fun DiscoveryFeedScreen(
         if (activeInspectedGroup != null) {
             StorefrontVersionPickerSheet(
                 group = activeInspectedGroup,
+                publisherProfiles = publisherProfiles,
                 openNsitesExternally = launcherPrefs.openNsitesExternally,
+                onSelectPublisher = selectPublisherAction,
                 onDismiss = { inspectedGroupId = null },
                 onInstallToggle = onInstallToggle,
                 onOpenApplet = onOpenApplet,
@@ -573,6 +673,9 @@ private fun GalleryStatusStrip(
     spamShieldEnabled: Boolean,
     blockedSpamCount: Int,
     connectedRelays: Int,
+    featuredCreatorLabel: String,
+    isFeaturedCreatorSelected: Boolean,
+    onToggleFeaturedCreator: () -> Unit,
     onToggleSpamShield: () -> Unit,
     onPublishNip51List: () -> Unit,
     onRefresh: () -> Unit
@@ -584,6 +687,27 @@ private fun GalleryStatusStrip(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.fillMaxWidth()
     ) {
+        item {
+            Surface(
+                onClick = onToggleFeaturedCreator,
+                shape = RoundedCornerShape(999.dp),
+                color = if (isFeaturedCreatorSelected) BreDeepPink else BrePinkDark3.copy(alpha = 0.72f),
+                border = BorderStroke(
+                    1.dp,
+                    if (isFeaturedCreatorSelected) BreWhite else BreDeepPink
+                ),
+                modifier = Modifier.testTag("featured_creator_filter_chip")
+            ) {
+                Text(
+                    text = "☆ $featuredCreatorLabel",
+                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                    color = BreWhite,
+                    maxLines = 1,
+                    softWrap = false,
+                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
+                )
+            }
+        }
         item {
             Surface(
                 onClick = onToggleSpamShield,
@@ -700,10 +824,12 @@ private fun LiveRelayStreamPanel(
     nappletCount: Int,
     nsiteCount: Int,
     items: List<InstalledAppletEntity>,
+    publisherProfiles: Map<String, PublisherProfileEntity>,
     openNsitesExternally: Boolean,
     isSearchActive: Boolean,
     onClearSearch: () -> Unit,
     onRefresh: () -> Unit,
+    onSelectPublisher: (String) -> Unit,
     onInstallToggle: (InstalledAppletEntity, Boolean) -> Unit,
     onOpenApplet: (InstalledAppletEntity) -> Unit,
     onForkToStudio: (InstalledAppletEntity) -> Unit
@@ -764,7 +890,9 @@ private fun LiveRelayStreamPanel(
                 items(items, key = { it.appletId }) { item ->
                     LiveFeedCatalogCard(
                         applet = item,
+                        publisherProfile = publisherProfiles[item.authorPubkey.lowercase()],
                         openNsitesExternally = openNsitesExternally,
+                        onSelectPublisher = onSelectPublisher,
                         onInstallToggle = { onInstallToggle(item, !item.isInstalled) },
                         onOpen = { onOpenApplet(item) },
                         onFork = { onForkToStudio(item) }
@@ -870,7 +998,9 @@ private fun CompactSegmentTab(
 @Composable
 private fun LiveFeedCatalogCard(
     applet: InstalledAppletEntity,
+    publisherProfile: PublisherProfileEntity?,
     openNsitesExternally: Boolean,
+    onSelectPublisher: (String) -> Unit,
     onInstallToggle: () -> Unit,
     onOpen: () -> Unit,
     onFork: () -> Unit
@@ -880,13 +1010,6 @@ private fun LiveFeedCatalogCard(
     }
     val cleanDesc = remember(applet.description) {
         NsiteSpamFilter.sanitizeSingleLine(applet.description)
-    }
-    val shortAuthor = remember(applet.authorNpub) {
-        if (applet.authorNpub.length > 18) {
-            "${applet.authorNpub.take(11)}…${applet.authorNpub.takeLast(4)}"
-        } else {
-            applet.authorNpub
-        }
     }
 
     Surface(
@@ -939,14 +1062,14 @@ private fun LiveFeedCatalogCard(
                         ProtocolBadgePill(isNsite = applet.isNsite, nip07 = applet.enableNip07)
                     }
 
-                    Spacer(modifier = Modifier.height(2.dp))
+                    Spacer(modifier = Modifier.height(3.dp))
 
-                    Text(
-                        text = "d:${applet.dTag} • $shortAuthor",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = ZineBoneCream.copy(alpha = 0.78f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                    PublisherAttributionRow(
+                        profile = publisherProfile,
+                        authorPubkey = applet.authorPubkey,
+                        authorNpub = applet.authorNpub,
+                        dTag = applet.dTag,
+                        onClickPublisher = onSelectPublisher
                     )
                 }
             }

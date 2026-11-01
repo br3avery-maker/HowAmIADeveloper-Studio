@@ -179,10 +179,12 @@ object NsiteSpamFilter {
         val protectedIds = HashSet<String>()
         val individuallyFlaggedIds = HashSet<String>()
 
+        val featuredHex = NostrCrypto.DEFAULT_FEATURED_CREATOR_PUBKEY_HEX
         for (item in items) {
-            val isLocalOrPinned = item.isInstalled ||
-                (localPubkeyHex.isNotBlank() && item.authorPubkey.equals(localPubkeyHex, ignoreCase = true))
-            if (isLocalOrPinned) {
+            val isLocalOrPinnedOrTrusted = item.isInstalled ||
+                (localPubkeyHex.isNotBlank() && item.authorPubkey.equals(localPubkeyHex, ignoreCase = true)) ||
+                (featuredHex.isNotBlank() && item.authorPubkey.equals(featuredHex, ignoreCase = true))
+            if (isLocalOrPinnedOrTrusted) {
                 protectedIds.add(item.appletId)
             } else if (isEntityIndividualSpam(item)) {
                 individuallyFlaggedIds.add(item.appletId)

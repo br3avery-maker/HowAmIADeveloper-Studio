@@ -5,6 +5,7 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -113,6 +114,22 @@ class LauncherPreferencesRepository(context: Context) {
         appContext.launcherDataStore.edit { it[KEY_OPEN_NSITES_EXTERNALLY] = enabled }
     }
 
+    /**
+     * Records `appletId` as having been initially auto-pinned once and returns `true` only on the
+     * very first time so user unpins are permanently respected across restarts.
+     */
+    suspend fun markAppletAutoPinnedOnce(appletId: String): Boolean {
+        var isFirstTime = false
+        appContext.launcherDataStore.edit { prefs ->
+            val current = prefs[KEY_AUTO_PINNED_IDS].orEmpty()
+            if (appletId !in current) {
+                isFirstTime = true
+                prefs[KEY_AUTO_PINNED_IDS] = current + appletId
+            }
+        }
+        return isFirstTime
+    }
+
     companion object {
         private val KEY_VIEW_MODE = stringPreferencesKey("view_mode")
         private val KEY_DISCOVERY_MODE = stringPreferencesKey("discovery_display_mode")
@@ -121,5 +138,6 @@ class LauncherPreferencesRepository(context: Context) {
         private val KEY_SCRIM_ALPHA = floatPreferencesKey("scrim_dim_alpha")
         private val KEY_BLOSSOM_SERVER = stringPreferencesKey("primary_blossom_server")
         private val KEY_OPEN_NSITES_EXTERNALLY = booleanPreferencesKey("open_nsites_externally")
+        private val KEY_AUTO_PINNED_IDS = stringSetPreferencesKey("auto_pinned_creator_applet_ids")
     }
 }

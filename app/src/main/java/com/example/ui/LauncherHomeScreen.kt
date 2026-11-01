@@ -86,6 +86,7 @@ import com.example.R
 import com.example.data.InstalledAppletEntity
 import com.example.data.LauncherPrefs
 import com.example.data.LauncherViewMode
+import com.example.data.PublisherProfileEntity
 import com.example.data.VaultAccountEntity
 import com.example.data.WallpaperStyle
 import com.example.nostr.ExternalSiteLauncher
@@ -109,9 +110,12 @@ fun LauncherHomeScreen(
     activeAccount: VaultAccountEntity?,
     launcherPrefs: LauncherPrefs,
     installedApplets: List<InstalledAppletEntity>,
+    publisherProfiles: Map<String, PublisherProfileEntity> = emptyMap(),
     connectedRelays: Int,
     totalRelays: Int,
     onOpenSearchFeed: () -> Unit,
+    onInspectPublisher: (String) -> Unit = {},
+    onSyncRelays: () -> Unit = {},
     onToggleViewMode: () -> Unit,
     onOpenAccountDrawer: () -> Unit,
     onLaunchApplet: (InstalledAppletEntity) -> Unit,
@@ -173,7 +177,11 @@ fun LauncherHomeScreen(
                 // Center Pinned Napplets & Nsites Canvas (Icon Grid vs BreBre Specimen List)
                 Box(modifier = Modifier.weight(1f)) {
                     if (installedApplets.isEmpty()) {
-                        EmptyLauncherPlaceholder(onOpenSearchFeed = onOpenSearchFeed)
+                        EmptyLauncherPlaceholder(
+                            connectedRelays = connectedRelays,
+                            onSyncRelays = onSyncRelays,
+                            onOpenSearchFeed = onOpenSearchFeed
+                        )
                     } else {
                         AnimatedContent(
                             targetState = launcherPrefs.viewMode,
@@ -197,9 +205,11 @@ fun LauncherHomeScreen(
                                         items(installedApplets, key = { it.appletId }) { applet ->
                                             LauncherGridTile(
                                                 applet = applet,
+                                                publisherProfile = publisherProfiles[applet.authorPubkey.lowercase()],
                                                 onLaunch = { onLaunchApplet(applet) },
                                                 onLaunchInApp = { onLaunchInApp(applet) },
                                                 onLaunchExternal = onLaunchExternal?.let { fn -> { fn(applet) } },
+                                                onInspectPublisher = { onInspectPublisher(applet.authorPubkey) },
                                                 onViewManifest = { inspectedManifestApplet = applet },
                                                 onOpenPermissions = onOpenAppletPermissions,
                                                 onFork = { onForkApplet(applet) },
@@ -225,10 +235,12 @@ fun LauncherHomeScreen(
                                                 ExternalSiteLauncher.resolveExternalUrl(applet) != null
                                             LauncherDescriptionRow(
                                                 applet = applet,
+                                                publisherProfile = publisherProfiles[applet.authorPubkey.lowercase()],
                                                 opensExternally = opensExternally,
                                                 onLaunch = { onLaunchApplet(applet) },
                                                 onLaunchInApp = { onLaunchInApp(applet) },
                                                 onLaunchExternal = onLaunchExternal?.let { fn -> { fn(applet) } },
+                                                onInspectPublisher = { onInspectPublisher(applet.authorPubkey) },
                                                 onViewManifest = { inspectedManifestApplet = applet },
                                                 onOpenPermissions = onOpenAppletPermissions,
                                                 onFork = { onForkApplet(applet) },
@@ -258,6 +270,11 @@ fun LauncherHomeScreen(
         if (manifestTarget != null) {
             ManifestInspectorDialog(
                 applet = manifestTarget,
+                publisherProfile = publisherProfiles[manifestTarget.authorPubkey.lowercase()],
+                onInspectPublisher = { pubkeyHex ->
+                    inspectedManifestApplet = null
+                    onInspectPublisher(pubkeyHex)
+                },
                 onDismiss = { inspectedManifestApplet = null }
             )
         }
@@ -661,9 +678,11 @@ fun AccountAvatarThumbnail(
 @Composable
 private fun LauncherGridTile(
     applet: InstalledAppletEntity,
+    publisherProfile: PublisherProfileEntity?,
     onLaunch: () -> Unit,
     onLaunchInApp: () -> Unit,
     onLaunchExternal: (() -> Unit)?,
+    onInspectPublisher: () -> Unit,
     onViewManifest: () -> Unit,
     onOpenPermissions: () -> Unit,
     onFork: () -> Unit,
@@ -671,6 +690,9 @@ private fun LauncherGridTile(
     onUnpin: () -> Unit
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
+    val publisherCaption = remember(publisherProfile, applet.authorNpub) {
+        publisherProfile?.bestName ?: PublisherProfileEntity.shortNpub(applet.authorNpub)
+    }
 
     Box(contentAlignment = Alignment.TopCenter) {
         Column(
@@ -686,24 +708,36 @@ private fun LauncherGridTile(
                 .testTag("launcher_tile_${applet.dTag}")
         ) {
             Box(
-                modifier = Modifier
-                    .size(62.dp)
-                    .clip(RoundedCornerShape(18.dp))
-                    .background(BreGray850.copy(alpha = 0.94f))
-                    .border(
-                        width = 1.2.dp,
-                        color = if (applet.isNsite) ZineBoneCream.copy(alpha = 0.8f) else BreDeepPink,
-                        shape = RoundedCornerShape(18.dp)
-                    ),
+                modifier = Modifier.size(66.dp),
                 contentAlignment = Alignment.Center
             ) {
-                Text(
-                    text = applet.iconGlyph,
-                    style = MaterialTheme.typography.headlineMedium,
-                    color = if (applet.iconGlyph == "≠" || applet.iconGlyph == "☆") BreDeepPink else BreWhite
+                Box(
+                    modifier = Modifier
+                        .size(62.dp)
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(BreGray850.copy(alpha = 0.94f))
+                        .border(
+                            width = 1.2.dp,
+                            color = if (applet.isNsite) ZineBoneCream.copy(alpha = 0.8f) else BreDeepPink,
+                            shape = RoundedCornerShape(18.dp)
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = applet.iconGlyph,
+                        style = MaterialTheme.typography.headlineMedium,
+                        color = if (applet.iconGlyph == "≠" || applet.iconGlyph == "☆") BreDeepPink else BreWhite
+                    )
+                }
+
+                PublisherAvatar(
+                    profile = publisherProfile,
+                    fallbackNpub = applet.authorNpub,
+                    sizeDp = 20,
+                    modifier = Modifier.align(Alignment.BottomEnd)
                 )
             }
-            Spacer(modifier = Modifier.height(6.dp))
+            Spacer(modifier = Modifier.height(5.dp))
             Text(
                 text = applet.title,
                 style = MaterialTheme.typography.labelLarge,
@@ -713,18 +747,23 @@ private fun LauncherGridTile(
                 textAlign = TextAlign.Center
             )
             Text(
-                text = if (applet.isNsite) "NSITE" else "NIP-5D",
+                text = publisherCaption,
                 style = MaterialTheme.typography.labelSmall,
-                color = if (applet.isNsite) ZineBoneCream else BreLightPink
+                color = if (applet.isNsite) ZineBoneCream else BreLightPink,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center
             )
         }
 
         AppletContextDropdown(
             expanded = menuExpanded,
             applet = applet,
+            publisherProfile = publisherProfile,
             onDismiss = { menuExpanded = false },
             onLaunchInApp = onLaunchInApp,
             onLaunchExternal = onLaunchExternal,
+            onInspectPublisher = onInspectPublisher,
             onViewManifest = onViewManifest,
             onOpenPermissions = onOpenPermissions,
             onFork = onFork,
@@ -737,10 +776,12 @@ private fun LauncherGridTile(
 @Composable
 private fun LauncherDescriptionRow(
     applet: InstalledAppletEntity,
+    publisherProfile: PublisherProfileEntity?,
     opensExternally: Boolean,
     onLaunch: () -> Unit,
     onLaunchInApp: () -> Unit,
     onLaunchExternal: (() -> Unit)?,
+    onInspectPublisher: () -> Unit,
     onViewManifest: () -> Unit,
     onOpenPermissions: () -> Unit,
     onFork: () -> Unit,
@@ -765,7 +806,10 @@ private fun LauncherDescriptionRow(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
                     Box(
                         modifier = Modifier
                             .size(42.dp)
@@ -781,13 +825,29 @@ private fun LauncherDescriptionRow(
                         )
                     }
                     Spacer(modifier = Modifier.width(12.dp))
-                    Column {
-                        Text(
-                            text = applet.title,
-                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                            color = BreWhite
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = applet.title,
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                color = BreWhite,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false)
+                            )
+                            ProtocolBadgePill(isNsite = applet.isNsite, nip07 = applet.enableNip07)
+                        }
+                        Spacer(modifier = Modifier.height(3.dp))
+                        PublisherAttributionRow(
+                            profile = publisherProfile,
+                            authorPubkey = applet.authorPubkey,
+                            authorNpub = applet.authorNpub,
+                            dTag = applet.dTag,
+                            onClickPublisher = { onInspectPublisher() }
                         )
-                        ProtocolBadgePill(isNsite = applet.isNsite, nip07 = applet.enableNip07)
                     }
                 }
 
@@ -805,9 +865,11 @@ private fun LauncherDescriptionRow(
                     AppletContextDropdown(
                         expanded = menuExpanded,
                         applet = applet,
+                        publisherProfile = publisherProfile,
                         onDismiss = { menuExpanded = false },
                         onLaunchInApp = onLaunchInApp,
                         onLaunchExternal = onLaunchExternal,
+                        onInspectPublisher = onInspectPublisher,
                         onViewManifest = onViewManifest,
                         onOpenPermissions = onOpenPermissions,
                         onFork = onFork,
@@ -874,9 +936,11 @@ fun ProtocolBadgePill(isNsite: Boolean, nip07: Boolean) {
 private fun AppletContextDropdown(
     expanded: Boolean,
     applet: InstalledAppletEntity,
+    publisherProfile: PublisherProfileEntity?,
     onDismiss: () -> Unit,
     onLaunchInApp: () -> Unit,
     onLaunchExternal: (() -> Unit)?,
+    onInspectPublisher: () -> Unit,
     onViewManifest: () -> Unit,
     onOpenPermissions: () -> Unit,
     onFork: () -> Unit,
@@ -884,6 +948,7 @@ private fun AppletContextDropdown(
     onUnpin: () -> Unit
 ) {
     val hasExternalUrl = remember(applet) { ExternalSiteLauncher.resolveExternalUrl(applet) != null }
+    val pubLabel = publisherProfile?.bestName ?: PublisherProfileEntity.shortNpub(applet.authorNpub)
 
     DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
         if (hasExternalUrl && onLaunchExternal != null) {
@@ -902,8 +967,17 @@ private fun AppletContextDropdown(
                 onLaunchInApp()
             }
         )
+        if (applet.authorPubkey.length == 64) {
+            DropdownMenuItem(
+                text = { Text("More by $pubLabel") },
+                onClick = {
+                    onDismiss()
+                    onInspectPublisher()
+                }
+            )
+        }
         DropdownMenuItem(
-            text = { Text("View Manifest & SHA-256") },
+            text = { Text("View Publisher & Manifest") },
             onClick = {
                 onDismiss()
                 onViewManifest()
@@ -943,6 +1017,8 @@ private fun AppletContextDropdown(
 @Composable
 private fun ManifestInspectorDialog(
     applet: InstalledAppletEntity,
+    publisherProfile: PublisherProfileEntity?,
+    onInspectPublisher: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
     val clipboard = LocalClipboardManager.current
@@ -955,13 +1031,19 @@ private fun ManifestInspectorDialog(
         containerColor = BreGray850,
         title = {
             Text(
-                text = "${applet.iconGlyph} ${applet.title} Manifest",
+                text = "${applet.iconGlyph} ${applet.title}",
                 style = MaterialTheme.typography.titleMedium,
                 color = BreWhite
             )
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                PublisherProfileCard(
+                    profile = publisherProfile,
+                    authorPubkey = applet.authorPubkey,
+                    authorNpub = applet.authorNpub,
+                    onFilterByPublisher = if (applet.authorPubkey.length == 64) onInspectPublisher else null
+                )
                 Text(
                     text = "Protocol: ${if (applet.isNsite) "NIP-5A Nsite" else "NIP-5D Napplet"} (Kind ${applet.kind})",
                     style = MaterialTheme.typography.labelMedium,
@@ -1010,7 +1092,11 @@ private fun ManifestInspectorDialog(
 }
 
 @Composable
-private fun EmptyLauncherPlaceholder(onOpenSearchFeed: () -> Unit) {
+private fun EmptyLauncherPlaceholder(
+    connectedRelays: Int,
+    onSyncRelays: () -> Unit,
+    onOpenSearchFeed: () -> Unit
+) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1019,29 +1105,58 @@ private fun EmptyLauncherPlaceholder(onOpenSearchFeed: () -> Unit) {
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
-            text = "☆ No Pinned Napplets Yet ☆",
+            text = if (connectedRelays == 0) {
+                stringResource(R.string.empty_launcher_title_syncing)
+            } else {
+                stringResource(R.string.empty_launcher_title_ready)
+            },
             style = MaterialTheme.typography.headlineSmall,
-            color = BreWhite
+            color = BreWhite,
+            textAlign = TextAlign.Center
         )
         Spacer(modifier = Modifier.height(8.dp))
         Text(
-            text = "Tap the search bar above to discover and install NIP-5D Napplets and NIP-5A Nsites.",
+            text = stringResource(R.string.empty_launcher_subtitle),
             style = MaterialTheme.typography.bodyMedium,
             color = BreGray100,
             textAlign = TextAlign.Center
         )
         Spacer(modifier = Modifier.height(16.dp))
-        Surface(
-            onClick = onOpenSearchFeed,
-            shape = RoundedCornerShape(14.dp),
-            color = BreDeepPink
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                text = "Explore Napplets | Nsites →",
-                style = MaterialTheme.typography.labelLarge,
-                color = BreWhite,
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp)
-            )
+            Surface(
+                onClick = onSyncRelays,
+                shape = RoundedCornerShape(14.dp),
+                color = BreGray850,
+                border = BorderStroke(1.dp, BrePinkDark2),
+                modifier = Modifier
+                    .minimumInteractiveComponentSize()
+                    .testTag("empty_home_sync_button")
+            ) {
+                Text(
+                    text = "Sync Relays",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = BreLightPink,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                )
+            }
+            Surface(
+                onClick = onOpenSearchFeed,
+                shape = RoundedCornerShape(14.dp),
+                color = BreDeepPink,
+                modifier = Modifier
+                    .minimumInteractiveComponentSize()
+                    .testTag("empty_home_explore_button")
+            ) {
+                Text(
+                    text = "Explore Gallery →",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = BreWhite,
+                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 12.dp)
+                )
+            }
         }
     }
 }

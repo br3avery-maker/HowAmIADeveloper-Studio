@@ -84,6 +84,7 @@ fun SovereignShellRoot(vm: ShellViewModel) {
     val accounts by vm.accounts.collectAsStateWithLifecycle()
     val launcherPrefs by vm.launcherPrefs.collectAsStateWithLifecycle()
     val installedApplets by vm.installedApplets.collectAsStateWithLifecycle()
+    val publisherProfiles by vm.publisherProfiles.collectAsStateWithLifecycle()
     val catalogApplets by vm.catalogApplets.collectAsStateWithLifecycle()
     val stackedGalleryGroups by vm.stackedGalleryGroups.collectAsStateWithLifecycle()
     val localCuratedCount by vm.localCuratedCount.collectAsStateWithLifecycle()
@@ -169,9 +170,15 @@ fun SovereignShellRoot(vm: ShellViewModel) {
                                 activeAccount = activeAccount,
                                 launcherPrefs = launcherPrefs,
                                 installedApplets = installedApplets,
+                                publisherProfiles = publisherProfiles,
                                 connectedRelays = connectedRelayCount,
                                 totalRelays = relays.size,
                                 onOpenSearchFeed = { vm.navigateTo(ShellDestination.DiscoveryFeed()) },
+                                onInspectPublisher = { pubkeyHex ->
+                                    vm.lookupPublisher(pubkeyHex)
+                                    vm.navigateTo(ShellDestination.DiscoveryFeed(initialPublisherPubkey = pubkeyHex))
+                                },
+                                onSyncRelays = { vm.refreshDiscoveryCatalog(silent = false) },
                                 onToggleViewMode = { vm.toggleLauncherViewMode() },
                                 onOpenAccountDrawer = { scope.launch { drawerState.open() } },
                                 onLaunchApplet = { app ->
@@ -198,13 +205,16 @@ fun SovereignShellRoot(vm: ShellViewModel) {
                         is ShellDestination.DiscoveryFeed -> {
                             DiscoveryFeedScreen(
                                 initialTabIsNsites = dest.initialTabIsNsites,
+                                initialPublisherPubkey = dest.initialPublisherPubkey,
                                 launcherPrefs = launcherPrefs,
+                                publisherProfiles = publisherProfiles,
                                 stackedGroups = stackedGalleryGroups,
                                 catalogApplets = catalogApplets,
                                 localCuratedCount = localCuratedCount,
                                 spamShieldEnabled = spamShieldEnabled,
                                 blockedSpamCount = blockedSpamCount,
                                 connectedRelays = connectedRelayCount,
+                                onLookupPublisher = { vm.lookupPublisher(it) },
                                 onToggleViewMode = { vm.toggleLauncherViewMode() },
                                 onToggleDiscoveryMode = { vm.toggleDiscoveryDisplayMode() },
                                 onToggleSpamShield = { vm.toggleSpamShield() },
@@ -332,6 +342,11 @@ fun SovereignShellRoot(vm: ShellViewModel) {
                                 AppletRuntimeScreen(
                                     applet = runningApplet,
                                     activeAccount = activeAccount,
+                                    publisherProfile = publisherProfiles[runningApplet.authorPubkey.lowercase()],
+                                    onInspectPublisher = { pubkeyHex ->
+                                        vm.lookupPublisher(pubkeyHex)
+                                        vm.navigateTo(ShellDestination.DiscoveryFeed(initialPublisherPubkey = pubkeyHex))
+                                    },
                                     resolveDocument = { vm.repository.resolveAppletDocument(it) },
                                     resolveAsset = { app, path, isMain, tx ->
                                         vm.repository.resolveAppletAsset(app, path, isMain, tx)

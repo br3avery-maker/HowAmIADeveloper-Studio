@@ -351,5 +351,127 @@ class ExampleRobolectricTest {
         assertEquals("text/css" to "utf-8", ShellRepository.guessMimeType("/styles/main.css"))
         assertEquals("application/wasm" to null, ShellRepository.guessMimeType("/engine.wasm"))
     }
+
+    @Test
+    fun kind0PublisherMetadataAndAuthorFiltersAndLegacyFakePurge_workEndToEnd() = kotlinx.coroutines.runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val author = NostrCrypto.generateKeyPair()
+
+        // 1. Verify RelayPoolClient.buildAuthorBundleFilters covers NIP-5A v1/v2 + NIP-5D + Kind 0/10002/10063
+        val (manifestsFilter, metaAndOutboxFilter) = com.example.nostr.RelayPoolClient.buildAuthorBundleFilters(
+            listOf(NostrCrypto.DEFAULT_FEATURED_CREATOR_PUBKEY_HEX)
+        )
+        val manifestKinds = manifestsFilter.getJSONArray("kinds")
+        val manifestKindSet = (0 until manifestKinds.length()).map { manifestKinds.getInt(it) }.toSet()
+        assertTrue(manifestKindSet.contains(NostrKinds.NSITE_NAMED))
+        assertTrue(manifestKindSet.contains(NostrKinds.NSITE_ROOT))
+        assertTrue(manifestKindSet.contains(NostrKinds.NSITE_LEGACY_FILE))
+        assertTrue(manifestKindSet.contains(NostrKinds.NAPPLET_NAMED))
+
+        val metaKinds = metaAndOutboxFilter.getJSONArray("kinds")
+        val metaKindSet = (0 until metaKinds.length()).map { metaKinds.getInt(it) }.toSet()
+        assertTrue(metaKindSet.contains(NostrKinds.METADATA))
+        assertTrue(metaKindSet.contains(NostrKinds.RELAY_LIST))
+        assertTrue(metaKindSet.contains(NostrKinds.USER_BLOSSOM_SERVERS))
+
+        // 2. Verify Kind 0 publisher metadata parsing & created_at monotonicity
+        val newerMetaJson = org.json.JSONObject()
+            .put("display_name", "BreBre Studio")
+            .put("name", "brebre")
+            .put("nip05", "_@brebre.dev")
+            .put("picture", "https://blossom.primal.net/avatar.png")
+            .put("about", "Building sovereign Nsites and puzzle games on Nostr.")
+            .put("website", "https://brebre.dev")
+            .put("lud16", "tips@brebre.dev")
+            .toString()
+
+        val newerKind0 = NostrEvent.createAndSign(
+            privKeyHex = author.privKeyHex,
+            kind = NostrKinds.METADATA,
+            content = newerMetaJson,
+            createdAt = 2_000_000L
+        )
+        val parsedProfile = ShellRepository.parseKind0Metadata(newerKind0)
+        assertNotNull(parsedProfile)
+        assertEquals("BreBre Studio", parsedProfile!!.bestName)
+        assertEquals("brebre.dev", parsedProfile.formattedNip05)
+        assertEquals("https://blossom.primal.net/avatar.png", parsedProfile.pictureUrl)
+        assertTrue(parsedProfile.hasResolvedIdentity)
+
+        val staleKind0 = NostrEvent.createAndSign(
+            privKeyHex = author.privKeyHex,
+            kind = NostrKinds.METADATA,
+            content = """{"display_name":"Old Name"}""",
+            createdAt = 1_000_000L
+        )
+        val afterStale = ShellRepository.parseKind0Metadata(staleKind0, existing = parsedProfile)
+        assertEquals("BreBre Studio", afterStale?.bestName)
+
+        // 3. Verify zero fake starter apps are seeded and legacy fake rows (even pinned) are purged while real Nsites survive
+        val db = androidx.room.Room.inMemoryDatabaseBuilder(
+            context,
+            com.example.data.ShellDatabase::class.java
+        ).allowMainThreadQueries().build()
+        try {
+            val dao = db.shellDao()
+            dao.upsertRelay(com.example.data.RelayEntity(url = "ws://127.0.0.1:1"))
+
+            // Insert legacy fake starter rows (blank indexSha256 + known fake dTag, pinned & unpinned)
+            val legacyPinnedFake = InstalledAppletEntity(
+                appletId = "35129:deadbeef:pulse-notes",
+                kind = NostrKinds.NAPPLET_NAMED,
+                authorPubkey = "deadbeef".repeat(8),
+                authorNpub = "npub1fake",
+                dTag = "pulse-notes",
+                title = "PulseNotes",
+                description = "Bundled fake demo",
+                iconGlyph = "⚡",
+                accentHex = "#FF1493",
+                indexSha256 = "",
+                inlineHtml = "<div>fake</div>",
+                isNsite = false,
+                enableNip07 = false,
+                isInstalled = true
+            )
+            val legacyUnpinnedFake = legacyPinnedFake.copy(
+                appletId = "35128:deadbeef:agent-zone",
+                kind = NostrKinds.NSITE_NAMED,
+                dTag = "agent-zone",
+                title = "Agent ≠ Zone",
+                isNsite = true,
+                isInstalled = false
+            )
+            // Insert real Nsite published by npub1s06cx40d060vq887lj8hj6hku5a6hzch5ylkzj03qv86dn02tqhs0wzl0d
+            val realSha = NostrCrypto.sha256Hex("<!DOCTYPE html><html><body>2048 Link</body></html>")
+            val realCreatorNsite = InstalledAppletEntity(
+                appletId = "35128:${NostrCrypto.DEFAULT_FEATURED_CREATOR_PUBKEY_HEX}:2048-link",
+                kind = NostrKinds.NSITE_NAMED,
+                authorPubkey = NostrCrypto.DEFAULT_FEATURED_CREATOR_PUBKEY_HEX,
+                authorNpub = NostrCrypto.DEFAULT_FEATURED_CREATOR_NPUB,
+                dTag = "2048-link",
+                title = "2048 Link",
+                description = "Real NIP-5A Nsite puzzle game.",
+                iconGlyph = "🎮",
+                accentHex = "#5CC8FF",
+                indexSha256 = realSha,
+                isNsite = true,
+                enableNip07 = true,
+                isInstalled = true
+            )
+            dao.upsertApplets(listOf(legacyPinnedFake, legacyUnpinnedFake, realCreatorNsite))
+            dao.upsertPublisherProfile(parsedProfile)
+
+            val repo = ShellRepository(context = context, dao = dao)
+            val purgedCount = repo.purgeLegacyFakeSeedApplets()
+            assertEquals(2, purgedCount)
+
+            val remaining = dao.getAllCatalogAppletsList()
+            assertEquals(listOf(realCreatorNsite.appletId), remaining.map { it.appletId })
+            assertEquals("BreBre Studio", dao.getPublisherProfile(author.pubKeyHex)?.bestName)
+        } finally {
+            db.close()
+        }
+    }
 }
+
 

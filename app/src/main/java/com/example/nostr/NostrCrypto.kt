@@ -381,13 +381,59 @@ object NostrCrypto {
 
     private const val BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 
+    const val DEFAULT_FEATURED_CREATOR_NPUB =
+        "npub1s06cx40d060vq887lj8hj6hku5a6hzch5ylkzj03qv86dn02tqhs0wzl0d"
+
+    val DEFAULT_FEATURED_CREATOR_PUBKEY_HEX: String by lazy {
+        decodeNpubToHex(DEFAULT_FEATURED_CREATOR_NPUB).orEmpty()
+    }
+
     fun encodeNpub(pubKeyHex: String): String = encodeBech32("npub", pubKeyHex.hexToBytes())
     fun encodeNsec(privKeyHex: String): String = encodeBech32("nsec", privKeyHex.hexToBytes())
 
     fun decodeNpubToHex(npub: String): String? = runCatching {
-        val (hrp, bytes) = decodeBech32(npub)
+        val cleaned = npub.trim().removePrefix("nostr:").removePrefix("NOSTR:")
+        val (hrp, bytes) = decodeBech32(cleaned)
         if (hrp == "npub" && bytes.size == 32) bytes.toHex() else null
     }.getOrNull()
+
+    /**
+     * Resolves any Nostr public key representation (`npub1...`, `nostr:npub1...`, `nprofile1...`,
+     * or raw 64-character hex pubkey) into a canonical lowercase 64-char hex pubkey.
+     */
+    fun resolvePubkeyHex(rawInput: String): String? {
+        val cleaned = rawInput.trim()
+            .removePrefix("nostr:")
+            .removePrefix("NOSTR:")
+            .trim()
+        if (cleaned.isBlank()) return null
+
+        if (cleaned.length == 64 && cleaned.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }) {
+            return cleaned.lowercase()
+        }
+        if (cleaned.startsWith("npub1", ignoreCase = true)) {
+            return decodeNpubToHex(cleaned)
+        }
+        if (cleaned.startsWith("nprofile1", ignoreCase = true)) {
+            return runCatching {
+                val (hrp, tlv) = decodeBech32(cleaned)
+                if (hrp != "nprofile") return@runCatching null
+                var pos = 0
+                while (pos + 2 <= tlv.size) {
+                    val t = tlv[pos].toInt() and 0xFF
+                    val len = tlv[pos + 1].toInt() and 0xFF
+                    pos += 2
+                    if (pos + len > tlv.size) break
+                    if (t == 0 && len == 32) {
+                        return@runCatching tlv.copyOfRange(pos, pos + 32).toHex()
+                    }
+                    pos += len
+                }
+                null
+            }.getOrNull()
+        }
+        return null
+    }
 
     /**
      * NIP-5A `pubkeyB36` encoder: encodes a raw 32-byte Nostr public key as a fixed-width

@@ -57,6 +57,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.data.InstalledAppletEntity
+import com.example.data.PublisherProfileEntity
 import com.example.data.StackedAppletGroup
 import com.example.data.StackedVariant
 import com.example.data.VariantRelation
@@ -82,6 +83,8 @@ import com.example.ui.theme.ZineBoneCream
 @Composable
 fun FeaturedSpotlightCarousel(
     featuredGroups: List<StackedAppletGroup>,
+    publisherProfiles: Map<String, PublisherProfileEntity> = emptyMap(),
+    onSelectPublisher: ((String) -> Unit)? = null,
     onSelectGroup: (StackedAppletGroup) -> Unit
 ) {
     if (featuredGroups.isEmpty()) return
@@ -117,6 +120,7 @@ fun FeaturedSpotlightCarousel(
         ) {
             items(featuredGroups.take(8), key = { "feat_${it.groupId}" }) { group ->
                 val app = group.primary
+                val pubProfile = publisherProfiles[app.authorPubkey.lowercase()]
                 Surface(
                     onClick = { onSelectGroup(group) },
                     shape = RoundedCornerShape(16.dp),
@@ -125,7 +129,7 @@ fun FeaturedSpotlightCarousel(
                         1.dp,
                         if (app.isNsite) ZineBoneCream.copy(alpha = 0.65f) else BreDeepPink.copy(alpha = 0.75f)
                     ),
-                    modifier = Modifier.width(226.dp)
+                    modifier = Modifier.width(236.dp)
                 ) {
                     Box(
                         modifier = Modifier
@@ -180,7 +184,14 @@ fun FeaturedSpotlightCarousel(
                                     )
                                 }
                             }
-                            Spacer(modifier = Modifier.height(6.dp))
+                            Spacer(modifier = Modifier.height(5.dp))
+                            PublisherAttributionRow(
+                                profile = pubProfile,
+                                authorPubkey = app.authorPubkey,
+                                authorNpub = app.authorNpub,
+                                onClickPublisher = onSelectPublisher
+                            )
+                            Spacer(modifier = Modifier.height(5.dp))
                             Text(
                                 text = NsiteSpamFilter.sanitizeSingleLine(app.description),
                                 style = MaterialTheme.typography.bodySmall,
@@ -203,11 +214,15 @@ fun FeaturedSpotlightCarousel(
 @Composable
 fun StackedGalleryGridTile(
     group: StackedAppletGroup,
+    publisherProfile: PublisherProfileEntity? = null,
     onSelectGroup: () -> Unit,
     onQuickLaunchPrimary: () -> Unit
 ) {
     val applet = group.primary
     val borderColor = if (applet.isNsite) ZineBoneCream.copy(alpha = 0.82f) else BreDeepPink
+    val publisherCaption = remember(publisherProfile, applet.authorNpub) {
+        publisherProfile?.bestName ?: PublisherProfileEntity.shortNpub(applet.authorNpub)
+    }
 
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -306,6 +321,14 @@ fun StackedGalleryGridTile(
                 }
             }
 
+            // Bottom-end publisher avatar badge
+            PublisherAvatar(
+                profile = publisherProfile,
+                fallbackNpub = applet.authorNpub,
+                sizeDp = 19,
+                modifier = Modifier.align(Alignment.BottomEnd)
+            )
+
             // Bottom-start NIP-51 curated badge
             if (group.isCuratedNip51) {
                 Box(
@@ -339,13 +362,14 @@ fun StackedGalleryGridTile(
         )
         Text(
             text = buildString {
-                append(if (applet.isNsite) "NSITE" else "NIP-5D")
+                append(publisherCaption)
                 if (group.hasMultipleEditions && group.anyInstalled) append(" • ✓")
             },
             style = MaterialTheme.typography.labelSmall,
             color = if (applet.isNsite) ZineBoneCream else BreLightPink,
             maxLines = 1,
-            softWrap = false
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center
         )
     }
 }
@@ -356,7 +380,9 @@ fun StackedGalleryGridTile(
 @Composable
 fun StackedGalleryListCard(
     group: StackedAppletGroup,
+    publisherProfile: PublisherProfileEntity? = null,
     openNsitesExternally: Boolean = true,
+    onSelectPublisher: ((String) -> Unit)? = null,
     onSelectGroup: () -> Unit,
     onQuickInstallOrOpen: () -> Unit
 ) {
@@ -436,18 +462,19 @@ fun StackedGalleryListCard(
                             ProtocolBadgePill(isNsite = applet.isNsite, nip07 = applet.enableNip07)
                         }
 
-                        Spacer(modifier = Modifier.height(2.dp))
+                        Spacer(modifier = Modifier.height(3.dp))
 
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            Text(
-                                text = "d:${applet.dTag}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = ZineBoneCream.copy(alpha = 0.82f),
-                                maxLines = 1,
-                                softWrap = false
+                            PublisherAttributionRow(
+                                profile = publisherProfile,
+                                authorPubkey = applet.authorPubkey,
+                                authorNpub = applet.authorNpub,
+                                dTag = applet.dTag,
+                                onClickPublisher = onSelectPublisher,
+                                modifier = Modifier.weight(1f, fill = false)
                             )
                             if (group.hasMultipleEditions) {
                                 Surface(
@@ -560,7 +587,9 @@ fun StackedGalleryListCard(
 @Composable
 fun StorefrontVersionPickerSheet(
     group: StackedAppletGroup,
+    publisherProfiles: Map<String, PublisherProfileEntity> = emptyMap(),
     openNsitesExternally: Boolean = true,
+    onSelectPublisher: ((String) -> Unit)? = null,
     onDismiss: () -> Unit,
     onInstallToggle: (InstalledAppletEntity, Boolean) -> Unit,
     onOpenApplet: (InstalledAppletEntity) -> Unit,
@@ -571,6 +600,7 @@ fun StorefrontVersionPickerSheet(
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val primary = group.primary
+    val primaryPublisher = publisherProfiles[primary.authorPubkey.lowercase()]
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -670,6 +700,20 @@ fun StorefrontVersionPickerSheet(
                 color = BreGray100
             )
 
+            Spacer(modifier = Modifier.height(8.dp))
+
+            PublisherProfileCard(
+                profile = primaryPublisher,
+                authorPubkey = primary.authorPubkey,
+                authorNpub = primary.authorNpub,
+                onFilterByPublisher = onSelectPublisher?.let { fn ->
+                    { pubkeyHex ->
+                        onDismiss()
+                        fn(pubkeyHex)
+                    }
+                }
+            )
+
             if (group.isLocalStarred) {
                 Spacer(modifier = Modifier.height(8.dp))
                 Surface(
@@ -725,7 +769,14 @@ fun StorefrontVersionPickerSheet(
                 items(group.variants, key = { it.applet.appletId }) { variant ->
                     VariantEditionCard(
                         variant = variant,
+                        publisherProfile = publisherProfiles[variant.applet.authorPubkey.lowercase()],
                         openNsitesExternally = openNsitesExternally,
+                        onSelectPublisher = onSelectPublisher?.let { fn ->
+                            { pubkeyHex ->
+                                onDismiss()
+                                fn(pubkeyHex)
+                            }
+                        },
                         onInstallToggle = {
                             onInstallToggle(variant.applet, !variant.applet.isInstalled)
                         },
@@ -751,7 +802,9 @@ fun StorefrontVersionPickerSheet(
 @Composable
 private fun VariantEditionCard(
     variant: StackedVariant,
+    publisherProfile: PublisherProfileEntity? = null,
     openNsitesExternally: Boolean,
+    onSelectPublisher: ((String) -> Unit)? = null,
     onInstallToggle: () -> Unit,
     onOpen: () -> Unit,
     onOpenInApp: () -> Unit,
@@ -829,22 +882,27 @@ private fun VariantEditionCard(
                 }
             }
 
-            Spacer(modifier = Modifier.height(3.dp))
+            Spacer(modifier = Modifier.height(4.dp))
 
-            val shortNpub = if (app.authorNpub.length > 18) {
-                "${app.authorNpub.take(12)}…${app.authorNpub.takeLast(5)}"
-            } else {
-                app.authorNpub
-            }
+            PublisherAttributionRow(
+                profile = publisherProfile,
+                authorPubkey = app.authorPubkey,
+                authorNpub = app.authorNpub,
+                dTag = app.dTag,
+                onClickPublisher = onSelectPublisher
+            )
+
+            Spacer(modifier = Modifier.height(2.dp))
+
             val shaLabel = if (app.indexSha256.isNotBlank()) {
                 " • sha:${app.indexSha256.take(10)}…"
             } else {
                 " • inline bundle"
             }
             Text(
-                text = "By $shortNpub • Kind ${app.kind} • d:${app.dTag}$shaLabel",
+                text = "Kind ${app.kind}$shaLabel",
                 style = MaterialTheme.typography.labelSmall,
-                color = BreGray100,
+                color = BreGray600,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )

@@ -34,4 +34,12 @@
     <string name="signer_allow_once">Sign Once</string>
     <string name="signer_allow_always">Always Allow Kind</string>
     <string name="signer_reject">Reject</string>
+    <string name="publisher_label">Publisher</string>
+    <string name="cd_publisher_avatar">Publisher Nostr avatar for %1$s</string>
+    <string name="publisher_view_all_apps">More by publisher</string>
+    <string name="publisher_copy_npub">Copy publisher npub</string>
+    <string name="empty_launcher_title_syncing">Syncing Live Nsites…</string>
+    <string name="empty_launcher_title_ready">No Pinned Apps Yet</string>
+    <string name="empty_launcher_subtitle">Zero bundled filler. Real NIP-5A Nsites and NIP-5D Napplets stream directly from Nostr relays.</string>
+    <string name="search_gallery_publishers_hint">Search apps, d-tags, publishers, or paste npub1…</string>
 </resources>

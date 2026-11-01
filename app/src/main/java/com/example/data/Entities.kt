@@ -110,3 +110,36 @@ data class CuratedBookmarkEntity(
     val isLocalCurator: Boolean = false,
     val createdAt: Long = System.currentTimeMillis()
 )
+
+@Entity(tableName = "publisher_profiles")
+data class PublisherProfileEntity(
+    @PrimaryKey val pubkeyHex: String,
+    val npub: String,
+    val displayName: String = "",
+    val username: String = "",
+    val nip05: String = "",
+    val pictureUrl: String = "",
+    val bannerUrl: String = "",
+    val about: String = "",
+    val website: String = "",
+    val lud16: String = "",
+    val eventCreatedAtSec: Long = 0L,
+    val updatedAt: Long = System.currentTimeMillis()
+) {
+    val bestName: String
+        get() = displayName.trim().ifBlank { username.trim() }.ifBlank { shortNpub(npub) }
+
+    val hasResolvedIdentity: Boolean
+        get() = displayName.isNotBlank() || username.isNotBlank() || nip05.isNotBlank() || pictureUrl.isNotBlank()
+
+    val formattedNip05: String
+        get() = nip05.trim().removePrefix("_@")
+
+    companion object {
+        fun shortNpub(npub: String): String {
+            val clean = npub.trim()
+            return if (clean.length > 18) "${clean.take(10)}…${clean.takeLast(5)}" else clean
+        }
+    }
+}
+

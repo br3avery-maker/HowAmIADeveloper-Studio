@@ -15,6 +15,7 @@ import com.example.data.LauncherViewMode
 import com.example.data.ManagedRelayItem
 import com.example.data.NoteEntity
 import com.example.data.PublishDeploymentReport
+import com.example.data.PublisherProfileEntity
 import com.example.data.ShellRepository
 import com.example.data.SignerAuditEntity
 import com.example.data.SignerPolicyEntity
@@ -44,7 +45,10 @@ import java.util.concurrent.ConcurrentHashMap
 
 sealed interface ShellDestination {
     data object HomeLauncher : ShellDestination
-    data class DiscoveryFeed(val initialTabIsNsites: Boolean = false) : ShellDestination
+    data class DiscoveryFeed(
+        val initialTabIsNsites: Boolean = false,
+        val initialPublisherPubkey: String? = null
+    ) : ShellDestination
     data object UserProfile : ShellDestination
     data object RelayManager : ShellDestination
     data object NotesComposer : ShellDestination
@@ -148,6 +152,9 @@ class ShellViewModel(
 
     val installedApplets: StateFlow<List<InstalledAppletEntity>> = repository.installedAppletsFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val publisherProfiles: StateFlow<Map<String, PublisherProfileEntity>> = repository.publisherProfilesFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
 
     val catalogApplets: StateFlow<List<InstalledAppletEntity>> = combine(
         repository.rawCatalogAppletsFlow,
@@ -517,11 +524,14 @@ class ShellViewModel(
             runCatching { repository.refreshCatalogFromRelays() }
                 .onSuccess {
                     if (!silent) {
-                        showBanner("Syncing NIP-5D Napplets, NIP-5A Nsites & NIP-51 lists…")
+                        showBanner("Syncing NIP-5D Napplets, NIP-5A Nsites & Kind 0 publishers…")
                     }
                 }
         }
     }
+
+    fun lookupPublisher(rawInput: String): String? =
+        repository.lookupPublisherAndSync(rawInput)
 
     fun toggleNip51Bookmark(applet: InstalledAppletEntity) {
         viewModelScope.launch {

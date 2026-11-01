@@ -1,5 +1,6 @@
 package com.example.data
 
+import com.example.nostr.NostrCrypto
 import com.example.nostr.NsiteSpamFilter
 
 enum class GalleryCategory(val label: String, val glyph: String) {
@@ -56,18 +57,6 @@ object CatalogStacker {
 
     private val NON_ALNUM_REGEX = Regex("""[^a-z0-9]+""")
 
-    private val FEATURED_STARTER_SLUGS = setOf(
-        "pulse-notes",
-        "puter-crt",
-        "agent-zone",
-        "cipher-pad",
-        "relay-sonar",
-        "pretend-zine",
-        "zap-calc",
-        "nostr-polls",
-        "pixel-synth"
-    )
-
     fun coordinateFor(applet: InstalledAppletEntity): String =
         "${applet.kind}:${applet.authorPubkey}:${applet.dTag}"
 
@@ -102,9 +91,13 @@ object CatalogStacker {
     fun buildStackedGroups(
         items: List<InstalledAppletEntity>,
         bookmarks: List<CuratedBookmarkEntity>,
-        localPubkeyHex: String
+        localPubkeyHex: String,
+        featuredAuthorPubkeys: Set<String> = setOfNotNull(
+            NostrCrypto.DEFAULT_FEATURED_CREATOR_PUBKEY_HEX.takeIf { it.isNotBlank() }
+        )
     ): List<StackedAppletGroup> {
         if (items.isEmpty()) return emptyList()
+        val lowerFeaturedAuthors = featuredAuthorPubkeys.mapTo(HashSet()) { it.lowercase() }
 
         val n = items.size
         val parent = IntArray(n) { it }
@@ -171,6 +164,7 @@ object CatalogStacker {
                 compareByDescending<Triple<InstalledAppletEntity, Boolean, List<String>>> { it.first.isInstalled }
                     .thenByDescending { it.second }
                     .thenByDescending { it.third.size }
+                    .thenByDescending { it.first.authorPubkey.lowercase() in lowerFeaturedAuthors }
                     .thenByDescending {
                         localPubkeyHex.isNotBlank() && it.first.authorPubkey.equals(localPubkeyHex, ignoreCase = true)
                     }
@@ -203,8 +197,9 @@ object CatalogStacker {
             val isLocalStarred = variants.any { it.isLocalStarred }
             val isCuratedNip51 = isLocalStarred || allCurators.isNotEmpty()
             val anyInstalled = variants.any { it.applet.isInstalled }
+            val isFeaturedAuthor = variants.any { it.applet.authorPubkey.lowercase() in lowerFeaturedAuthors }
             val isFeatured = isCuratedNip51 ||
-                canonicalSlug(primary.dTag) in FEATURED_STARTER_SLUGS ||
+                isFeaturedAuthor ||
                 completenessScore(primary) >= 4
 
             val categories = classifyCategories(
@@ -226,6 +221,7 @@ object CatalogStacker {
             )
         }.sortedWith(
             compareByDescending<StackedAppletGroup> { it.anyInstalled }
+                .thenByDescending { grp -> grp.variants.any { it.applet.authorPubkey.lowercase() in lowerFeaturedAuthors } }
                 .thenByDescending { it.isLocalStarred }
                 .thenByDescending { it.isCuratedNip51 }
                 .thenByDescending { it.isFeatured }
@@ -266,7 +262,7 @@ object CatalogStacker {
         if (listOf("cipher", "encrypt", "relay", "sonar", "calc", "zap", "sats", "tool", "vault", "key", "storage").any { it in hay }) {
             out.add(GalleryCategory.TOOLS)
         }
-        if (listOf("crt", "puter", "game", "chess", "pixel", "synth", "art", "canvas", "play", "audio", "music").any { it in hay }) {
+        if (listOf("2048", "puzzle", "link", "board", "arcade", "score", "crt", "puter", "game", "chess", "pixel", "synth", "art", "canvas", "play", "audio", "music").any { it in hay }) {
             out.add(GalleryCategory.GAMES_ART)
         }
         if (listOf("zine", "blog", "guide", "wiki", "doc", "read", "article", "manifesto").any { it in hay }) {

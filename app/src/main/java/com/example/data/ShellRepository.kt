@@ -65,12 +65,41 @@ class ShellRepository(
     private val appContext = context.applicationContext
     private val repoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val authorBlossomCache = ConcurrentHashMap<String, List<String>>()
-    private val legacyNsitePathCache = ConcurrentHashMap<String, Map<String, String>>()
+    private val legacyNsitePathCache = ConcurrentHashMap<String, MutableMap<String, String>>()
+    private val metadataRequestedTimestamps = ConcurrentHashMap<String, Long>()
 
     val accountsFlow: Flow<List<VaultAccountEntity>> = dao.observeAccounts()
     val activeAccountFlow: Flow<VaultAccountEntity?> = dao.observeActiveAccount()
     val installedAppletsFlow: Flow<List<InstalledAppletEntity>> = dao.observeInstalledApplets()
     val rawCatalogAppletsFlow: Flow<List<InstalledAppletEntity>> = dao.observeAllCatalogApplets()
+    val publisherProfilesFlow: Flow<Map<String, PublisherProfileEntity>> = combine(
+        dao.observePublisherProfiles(),
+        dao.observeAccounts()
+    ) { remoteProfiles, localAccounts ->
+        val map = LinkedHashMap<String, PublisherProfileEntity>(remoteProfiles.size + localAccounts.size)
+        remoteProfiles.forEach { profile ->
+            map[profile.pubkeyHex.lowercase()] = profile
+        }
+        localAccounts.forEach { acc ->
+            val key = acc.pubkeyHex.lowercase()
+            val existing = map[key]
+            val localPic = acc.localAvatarPath.ifBlank { acc.remoteAvatarUrl }
+            map[key] = PublisherProfileEntity(
+                pubkeyHex = key,
+                npub = acc.npub,
+                displayName = acc.displayName.ifBlank { existing?.displayName.orEmpty() },
+                username = existing?.username.orEmpty(),
+                nip05 = existing?.nip05.orEmpty(),
+                pictureUrl = localPic.ifBlank { existing?.pictureUrl.orEmpty() },
+                bannerUrl = existing?.bannerUrl.orEmpty(),
+                about = acc.bio.ifBlank { existing?.about.orEmpty() },
+                website = existing?.website.orEmpty(),
+                lud16 = existing?.lud16.orEmpty(),
+                eventCreatedAtSec = existing?.eventCreatedAtSec ?: (acc.createdAt / 1000L)
+            )
+        }
+        map
+    }
     val filteredCatalogFlow: Flow<NsiteSpamFilter.CatalogFilterResult> = combine(
         dao.observeAllCatalogApplets(),
         dao.observeActiveAccount()
@@ -137,10 +166,14 @@ class ShellRepository(
             active = initial
         }
 
-        // 2. Seed default relays if empty (or upgrade untouched 3-relay initial set with Napplet indexers)
+        // 2. Seed default relays if empty (or upgrade untouched legacy relay sets with Nsite & metadata indexers)
         val currentRelays = dao.getRelaysList()
         val currentUrlSet = currentRelays.map { it.url }.toSet()
-        val relayUrls = if (currentRelays.isEmpty() || currentUrlSet == RelayPoolClient.LEGACY_INITIAL_RELAYS) {
+        val relayUrls = if (
+            currentRelays.isEmpty() ||
+            currentUrlSet == RelayPoolClient.LEGACY_INITIAL_RELAYS ||
+            currentUrlSet == RelayPoolClient.LEGACY_FIVE_RELAYS
+        ) {
             RelayPoolClient.DEFAULT_RELAYS.forEach { url ->
                 if (url !in currentUrlSet) {
                     dao.upsertRelay(RelayEntity(url = url))
@@ -152,18 +185,29 @@ class ShellRepository(
         }
         relayPool.syncRelays(relayUrls)
 
-        // 3. Seed starter Napplets & Nsites catalog (inserting any missing showcase starters without overwriting user pins)
-        if (active != null) {
-            val existingIds = dao.getAllCatalogAppletsList().mapTo(HashSet()) { it.appletId }
-            val missingStarters = StarterCatalog.defaultCatalog(active.pubkeyHex, active.npub)
-                .filter { it.appletId !in existingIds }
-            if (missingStarters.isNotEmpty()) {
-                dao.upsertApplets(missingStarters)
-            }
-        }
+        // 3. Purge any legacy bundled fake demo apps and spam entries — zero fake apps!
+        purgeLegacyFakeSeedApplets()
         purgeCachedSpamApplets(active?.pubkeyHex.orEmpty())
 
+        // 4. Prioritize live Nsites & profile metadata for the featured creator pubkey + existing catalog authors
+        if (NostrCrypto.DEFAULT_FEATURED_CREATOR_PUBKEY_HEX.length == 64) {
+            relayPool.trackAndQueryAuthor(NostrCrypto.DEFAULT_FEATURED_CREATOR_PUBKEY_HEX)
+        }
         active?.let { relayPool.requestAuthorMetadata(it.pubkeyHex) }
+        requestMissingPublisherProfiles()
+    }
+
+    suspend fun purgeLegacyFakeSeedApplets(): Int = withContext(Dispatchers.IO) {
+        val all = dao.getAllCatalogAppletsList()
+        val fakeIds = all.filter { item ->
+            item.indexSha256.isBlank() && item.dTag in StarterCatalog.LEGACY_FAKE_SEED_DTAGS
+        }.map { it.appletId }
+        if (fakeIds.isNotEmpty()) {
+            fakeIds.chunked(200).forEach { batch ->
+                dao.deleteAppletsByIds(batch)
+            }
+        }
+        fakeIds.size
     }
 
     suspend fun purgeCachedSpamApplets(localPubkeyHex: String): Int = withContext(Dispatchers.IO) {
@@ -177,22 +221,189 @@ class ShellRepository(
         spamIds.size
     }
 
+    suspend fun requestMissingPublisherProfiles(force: Boolean = false) = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        val candidatePubkeys = buildSet {
+            if (NostrCrypto.DEFAULT_FEATURED_CREATOR_PUBKEY_HEX.length == 64) {
+                add(NostrCrypto.DEFAULT_FEATURED_CREATOR_PUBKEY_HEX.lowercase())
+            }
+            dao.getAllCatalogAppletsList().forEach { app ->
+                val pk = app.authorPubkey.trim().lowercase()
+                if (pk.length == 64) add(pk)
+            }
+        }
+        val toQuery = candidatePubkeys.filter { pk ->
+            val lastReq = metadataRequestedTimestamps[pk] ?: 0L
+            val ttlExpired = now - lastReq > 300_000L
+            force || (ttlExpired && dao.getPublisherProfile(pk) == null)
+        }
+        if (toQuery.isNotEmpty()) {
+            toQuery.forEach { metadataRequestedTimestamps[it] = now }
+            relayPool.requestAuthorsMetadata(toQuery)
+        }
+    }
+
+    private fun ensureAuthorMetadataRequested(pubkeyHex: String) {
+        val pk = pubkeyHex.trim().lowercase()
+        if (pk.length != 64) return
+        val now = System.currentTimeMillis()
+        val prev = metadataRequestedTimestamps[pk] ?: 0L
+        if (now - prev > 300_000L) {
+            metadataRequestedTimestamps[pk] = now
+            relayPool.requestAuthorMetadata(pk)
+        }
+    }
+
+    fun lookupPublisherAndSync(rawNpubOrHex: String): String? {
+        val resolvedHex = NostrCrypto.resolvePubkeyHex(rawNpubOrHex) ?: return null
+        metadataRequestedTimestamps[resolvedHex] = System.currentTimeMillis()
+        relayPool.trackAndQueryAuthor(resolvedHex)
+        return resolvedHex
+    }
+
     suspend fun refreshCatalogFromRelays() = withContext(Dispatchers.IO) {
         val active = dao.getActiveAccount()
+        purgeLegacyFakeSeedApplets()
         purgeCachedSpamApplets(active?.pubkeyHex.orEmpty())
         relayPool.refreshDiscoveryCatalog()
+        if (NostrCrypto.DEFAULT_FEATURED_CREATOR_PUBKEY_HEX.length == 64) {
+            relayPool.trackAndQueryAuthor(NostrCrypto.DEFAULT_FEATURED_CREATOR_PUBKEY_HEX)
+        }
+        requestMissingPublisherProfiles(force = true)
     }
 
     private suspend fun observeRelayEvents() {
         relayPool.incomingEvents.collect { (_, event) ->
             when (event.kind) {
                 NostrKinds.METADATA -> handleIncomingMetadata(event)
+                NostrKinds.RELAY_LIST -> handleIncomingRelayList(event)
+                NostrKinds.USER_BLOSSOM_SERVERS -> handleIncomingBlossomServerList(event)
                 NostrKinds.TEXT_NOTE -> handleIncomingTextNote(event)
                 NostrKinds.NIP51_BOOKMARK_SET, NostrKinds.NIP51_CATEGORIZED_LIST,
                 NostrKinds.NIP51_BOOKMARKS -> handleIncomingNip51List(event)
+                NostrKinds.NSITE_LEGACY_FILE -> handleIncomingLegacyNsiteFile(event)
                 NostrKinds.NAPPLET_NAMED, NostrKinds.NAPPLET_ROOT, NostrKinds.NAPPLET_SNAPSHOT,
                 NostrKinds.NSITE_NAMED, NostrKinds.NSITE_ROOT -> handleIncomingManifest(event)
             }
+        }
+    }
+
+    private fun handleIncomingRelayList(event: NostrEvent) {
+        val pk = event.pubkey.trim().lowercase()
+        if (pk.length != 64) return
+        val isFeatured = pk.equals(NostrCrypto.DEFAULT_FEATURED_CREATOR_PUBKEY_HEX, ignoreCase = true)
+        if (!isFeatured && !metadataRequestedTimestamps.containsKey(pk)) return
+
+        val writeRelays = event.tags
+            .filter { row ->
+                row.size >= 2 &&
+                    row[0] == "r" &&
+                    row[1].trim().startsWith("wss://", ignoreCase = true) &&
+                    (row.size < 3 || row[2].isBlank() || row[2].equals("write", ignoreCase = true))
+            }
+            .map { RelayPoolClient.normalizeRelayUrl(it[1]) }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .take(4)
+
+        if (writeRelays.isNotEmpty()) {
+            relayPool.trackAndQueryAuthor(pk, writeRelays)
+        }
+    }
+
+    private fun handleIncomingBlossomServerList(event: NostrEvent) {
+        val pk = event.pubkey.trim().lowercase()
+        if (pk.length != 64) return
+        val servers = event.tags
+            .filter {
+                it.size >= 2 &&
+                    (it[0] == "server" || it[0] == "r") &&
+                    (it[1].startsWith("https://", ignoreCase = true) || it[1].startsWith("http://", ignoreCase = true))
+            }
+            .map { it[1].trim().trimEnd('/') }
+            .distinct()
+        if (servers.isNotEmpty()) {
+            authorBlossomCache[pk] = servers
+        }
+    }
+
+    private suspend fun handleIncomingLegacyNsiteFile(event: NostrEvent) {
+        val pk = event.pubkey.trim().lowercase()
+        if (pk.length != 64) return
+        val path = event.tags.firstOrNull { it.size >= 2 && (it[0] == "d" || it[0] == "path") }
+            ?.get(1)?.trim().orEmpty()
+        val sha = event.tags.firstOrNull { it.size >= 2 && (it[0] == "x" || it[0] == "sha256") }
+            ?.get(1)?.trim().orEmpty()
+        if (path.isBlank() || sha.length != 64) return
+
+        val authorMap = legacyNsitePathCache.getOrPut(pk) { ConcurrentHashMap() }
+        authorMap[path] = sha
+
+        if (path == "/index.html" || path == "index.html") {
+            // Only materialize a NIP-5A v1 legacy root Nsite if no v2 Kind 15128 root manifest exists yet
+            if (dao.getAppletById("${NostrKinds.NSITE_ROOT}:$pk:root") != null) return
+
+            val legacyId = "${NostrKinds.NSITE_LEGACY_FILE}:$pk:root"
+            val existing = dao.getAppletById(legacyId)
+            val isFeaturedCreator = pk.equals(NostrCrypto.DEFAULT_FEATURED_CREATOR_PUBKEY_HEX, ignoreCase = true)
+            val localAcc = dao.getAccountByPubkey(pk)
+            val npub = runCatching { NostrCrypto.encodeNpub(pk) }.getOrDefault(pk.take(16))
+            val profile = dao.getPublisherProfile(pk)
+            val fallbackTitle = profile?.displayName?.ifBlank { profile.username }?.takeIf { it.isNotBlank() }
+                ?.let { "$it Nsite" }
+                ?: "Nsite ${pk.take(6)}"
+            val rawTitle = event.tags.firstOrNull { it.size >= 2 && (it[0] == "title" || it[0] == "name") }
+                ?.get(1)?.ifBlank { null }
+                ?: existing?.title?.ifBlank { null }
+                ?: fallbackTitle
+            val cleanTitle = NsiteSpamFilter.sanitizeSingleLine(rawTitle).take(80)
+            val cleanDesc = NsiteSpamFilter.sanitizeSingleLine(
+                event.content.ifBlank { "Decentralized NIP-5A Nsite on Blossom." }
+            ).take(260)
+
+            if (localAcc == null && !isFeaturedCreator && existing?.isInstalled != true) {
+                if (NsiteSpamFilter.isIndividualSpam(NostrKinds.NSITE_ROOT, "root", cleanTitle, cleanDesc, authorMap.size.coerceAtLeast(1))) {
+                    return
+                }
+            }
+
+            val server = event.tags
+                .firstOrNull {
+                    it.size >= 2 &&
+                        (it[0] == "server" || it[0] == "blossom") &&
+                        (it[1].startsWith("https://", ignoreCase = true) || it[1].startsWith("http://", ignoreCase = true))
+                }
+                ?.get(1)?.trim()?.trimEnd('/')
+                ?: authorBlossomCache[pk]?.firstOrNull()
+                ?: "https://blossom.primal.net"
+
+            val pathsJson = JSONObject().apply {
+                authorMap.forEach { (k, v) -> put(k, v) }
+            }.toString()
+
+            val shouldAutoPin = isFeaturedCreator && existing == null && prefsRepo.markAppletAutoPinnedOnce(legacyId)
+            dao.upsertApplet(
+                InstalledAppletEntity(
+                    appletId = legacyId,
+                    kind = NostrKinds.NSITE_ROOT,
+                    authorPubkey = pk,
+                    authorNpub = npub,
+                    dTag = "root",
+                    title = cleanTitle,
+                    description = cleanDesc,
+                    iconGlyph = existing?.iconGlyph ?: "🌐",
+                    accentHex = existing?.accentHex ?: "#5CC8FF",
+                    isNsite = true,
+                    enableNip07 = existing?.enableNip07 ?: true,
+                    blossomServer = server,
+                    indexSha256 = sha,
+                    manifestPathsJson = pathsJson,
+                    isInstalled = if (shouldAutoPin) true else (existing?.isInstalled ?: false),
+                    pinOrder = if (shouldAutoPin) 1 else (existing?.pinOrder ?: 99),
+                    updatedAt = event.createdAt * 1000L
+                )
+            )
+            ensureAuthorMetadataRequested(pk)
         }
     }
 
@@ -234,6 +445,7 @@ class ShellRepository(
             )
         }
         dao.upsertCuratedBookmarks(entities)
+        ensureAuthorMetadataRequested(event.pubkey)
 
         // Fetch any curated manifests not yet stored locally
         val missingCoords = coordinates.filter { dao.getAppletById(it) == null }
@@ -243,18 +455,31 @@ class ShellRepository(
     }
 
     private suspend fun handleIncomingMetadata(event: NostrEvent) {
-        val localAcc = dao.getAccountByPubkey(event.pubkey) ?: return
-        runCatching {
-            val obj = JSONObject(event.content)
-            val name = obj.optString("display_name").ifBlank { obj.optString("name") }
-            val about = obj.optString("about")
-            val picture = obj.optString("picture")
-            if (name.isNotBlank() || about.isNotBlank() || picture.isNotBlank()) {
+        val pk = event.pubkey.trim().lowercase()
+        if (pk.length != 64) return
+
+        val existingProfile = dao.getPublisherProfile(pk)
+        val parsedProfile = parseKind0Metadata(event, existingProfile)
+        if (parsedProfile != null) {
+            dao.upsertPublisherProfile(parsedProfile)
+            if (parsedProfile.hasResolvedIdentity) {
+                dao.updateCachedNotesAuthorProfile(
+                    pubkeyHex = pk,
+                    authorName = parsedProfile.bestName,
+                    authorAvatar = parsedProfile.pictureUrl
+                )
+            }
+        }
+
+        val localAcc = dao.getAccountByPubkey(event.pubkey) ?: dao.getAccountByPubkey(pk)
+        if (localAcc != null && parsedProfile != null) {
+            val name = parsedProfile.displayName.ifBlank { parsedProfile.username }
+            if (name.isNotBlank() || parsedProfile.about.isNotBlank() || parsedProfile.pictureUrl.isNotBlank()) {
                 dao.upsertAccount(
                     localAcc.copy(
                         displayName = name.ifBlank { localAcc.displayName },
-                        bio = about.ifBlank { localAcc.bio },
-                        remoteAvatarUrl = picture.ifBlank { localAcc.remoteAvatarUrl }
+                        bio = parsedProfile.about.ifBlank { localAcc.bio },
+                        remoteAvatarUrl = parsedProfile.pictureUrl.ifBlank { localAcc.remoteAvatarUrl }
                     )
                 )
             }
@@ -263,14 +488,22 @@ class ShellRepository(
 
     private suspend fun handleIncomingTextNote(event: NostrEvent) {
         if (event.content.isBlank()) return
-        val localAcc = dao.getAccountByPubkey(event.pubkey)
-        val npub = runCatching { NostrCrypto.encodeNpub(event.pubkey) }.getOrDefault(event.pubkey.take(16))
+        val pk = event.pubkey.trim().lowercase()
+        val localAcc = dao.getAccountByPubkey(event.pubkey) ?: dao.getAccountByPubkey(pk)
+        val cachedPublisher = dao.getPublisherProfile(pk)
+        val npub = runCatching { NostrCrypto.encodeNpub(pk) }.getOrDefault(pk.take(16))
+        val resolvedName = localAcc?.displayName?.ifBlank { null }
+            ?: cachedPublisher?.takeIf { it.hasResolvedIdentity }?.bestName
+            ?: "npub1…${npub.takeLast(6)}"
+        val resolvedAvatar = localAcc?.localAvatarPath?.ifBlank { localAcc.remoteAvatarUrl }
+            ?.ifBlank { null }
+            ?: cachedPublisher?.pictureUrl.orEmpty()
         val note = NoteEntity(
             eventId = event.id,
-            pubkeyHex = event.pubkey,
+            pubkeyHex = pk,
             npub = npub,
-            authorName = localAcc?.displayName ?: "npub1…${npub.takeLast(6)}",
-            authorAvatar = localAcc?.localAvatarPath?.ifBlank { localAcc.remoteAvatarUrl }.orEmpty(),
+            authorName = resolvedName,
+            authorAvatar = resolvedAvatar,
             content = event.content,
             createdAtSec = event.createdAt,
             sigHex = event.sig,
@@ -279,23 +512,35 @@ class ShellRepository(
             isLocalUser = localAcc != null
         )
         dao.upsertNote(note)
+        if (localAcc == null && cachedPublisher == null) {
+            ensureAuthorMetadataRequested(pk)
+        }
     }
 
     private suspend fun handleIncomingManifest(event: NostrEvent) {
+        val pk = event.pubkey.trim().lowercase()
         val dTag = when (event.kind) {
             NostrKinds.NAPPLET_SNAPSHOT -> event.id.take(10)
             NostrKinds.NAPPLET_ROOT, NostrKinds.NSITE_ROOT -> "root"
             else -> event.tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.get(1)?.ifBlank { null } ?: "root"
         }
-        val appletId = "${event.kind}:${event.pubkey}:$dTag"
-        val existing = dao.getAppletById(appletId)
-        val localAccount = dao.getAccountByPubkey(event.pubkey)
+        val appletId = "${event.kind}:$pk:$dTag"
+        val existing = dao.getAppletById(appletId) ?: dao.getAppletById("${event.kind}:${event.pubkey}:$dTag")
+        val localAccount = dao.getAccountByPubkey(event.pubkey) ?: dao.getAccountByPubkey(pk)
+        val isFeaturedCreator = pk.equals(NostrCrypto.DEFAULT_FEATURED_CREATOR_PUBKEY_HEX, ignoreCase = true)
         val parsed = parseManifestEventToEntity(
-            event = event,
+            event = event.copy(pubkey = pk),
             existing = existing,
-            isLocalAuthor = localAccount != null
+            isLocalAuthor = localAccount != null || isFeaturedCreator
         ) ?: return
-        dao.upsertApplet(parsed)
+
+        val finalEntity = if (isFeaturedCreator && existing == null && prefsRepo.markAppletAutoPinnedOnce(parsed.appletId)) {
+            parsed.copy(isInstalled = true, pinOrder = 1)
+        } else {
+            parsed
+        }
+        dao.upsertApplet(finalEntity)
+        ensureAuthorMetadataRequested(pk)
     }
 
     // --- Account & Key Vault Management ---
@@ -811,7 +1056,8 @@ class ShellRepository(
     private suspend fun fetchLegacyNsitePathMap(authorPubkey: String): Map<String, String> = withContext(Dispatchers.IO) {
         val pk = authorPubkey.trim().lowercase()
         if (pk.length != 64) return@withContext emptyMap()
-        legacyNsitePathCache[pk]?.let { return@withContext it }
+        val cached = legacyNsitePathCache[pk]
+        if (cached != null && cached.size > 1) return@withContext cached
 
         val filter = JSONObject().apply {
             put("kinds", JSONArray().put(NostrKinds.NSITE_LEGACY_FILE))
@@ -819,11 +1065,12 @@ class ShellRepository(
             put("limit", 120)
         }
         val events = runCatching { relayPool.queryEventsOnce(filter, timeoutMs = 2400L) }.getOrDefault(emptyList())
-        val map = LinkedHashMap<String, String>()
+        val map = ConcurrentHashMap<String, String>()
+        cached?.let { map.putAll(it) }
         events.sortedByDescending { it.createdAt }.forEach { ev ->
             val path = ev.tags.firstOrNull { it.size >= 2 && (it[0] == "d" || it[0] == "path") }?.get(1)?.trim().orEmpty()
             val sha = ev.tags.firstOrNull { it.size >= 2 && (it[0] == "x" || it[0] == "sha256") }?.get(1)?.trim().orEmpty()
-            if (path.isNotBlank() && sha.length == 64 && path !in map) {
+            if (path.isNotBlank() && sha.length == 64 && !map.containsKey(path)) {
                 map[path] = sha
             }
         }
@@ -1123,6 +1370,59 @@ class ShellRepository(
 
     companion object {
         private val SHA256_HEX_REGEX = Regex("""^[0-9a-fA-F]{64}$""")
+
+        /**
+         * Parses a NIP-01 `Kind 0` metadata event into a `PublisherProfileEntity` for any Nostr author,
+         * honoring `created_at` ordering so older relay copies never overwrite newer publisher profiles.
+         */
+        fun parseKind0Metadata(
+            event: NostrEvent,
+            existing: PublisherProfileEntity? = null
+        ): PublisherProfileEntity? {
+            if (event.kind != NostrKinds.METADATA || event.content.isBlank()) return null
+            val pk = event.pubkey.trim().lowercase()
+            if (pk.length != 64) return null
+            if (existing != null && event.createdAt < existing.eventCreatedAtSec) {
+                return existing
+            }
+            val obj = runCatching { JSONObject(event.content) }.getOrNull() ?: return null
+            val npub = existing?.npub?.takeIf { it.startsWith("npub1") }
+                ?: runCatching { NostrCrypto.encodeNpub(pk) }.getOrDefault(pk.take(16))
+
+            val displayName = NsiteSpamFilter.sanitizeSingleLine(
+                obj.optString("display_name").ifBlank { obj.optString("displayName") }
+            ).take(60)
+            val username = NsiteSpamFilter.sanitizeSingleLine(
+                obj.optString("name").ifBlank { obj.optString("username") }
+            ).take(50)
+            val nip05 = NsiteSpamFilter.sanitizeSingleLine(obj.optString("nip05")).take(80)
+            val picture = obj.optString("picture").ifBlank { obj.optString("image") }.trim()
+                .takeIf { it.startsWith("https://", ignoreCase = true) || it.startsWith("http://", ignoreCase = true) }
+                .orEmpty()
+            val banner = obj.optString("banner").trim()
+                .takeIf { it.startsWith("https://", ignoreCase = true) || it.startsWith("http://", ignoreCase = true) }
+                .orEmpty()
+            val about = NsiteSpamFilter.sanitizeSingleLine(
+                obj.optString("about").ifBlank { obj.optString("bio") }
+            ).take(280)
+            val website = obj.optString("website").trim().take(120)
+            val lud16 = obj.optString("lud16").trim().take(80)
+
+            return PublisherProfileEntity(
+                pubkeyHex = pk,
+                npub = npub,
+                displayName = displayName.ifBlank { existing?.displayName.orEmpty() },
+                username = username.ifBlank { existing?.username.orEmpty() },
+                nip05 = nip05.ifBlank { existing?.nip05.orEmpty() },
+                pictureUrl = picture.ifBlank { existing?.pictureUrl.orEmpty() },
+                bannerUrl = banner.ifBlank { existing?.bannerUrl.orEmpty() },
+                about = about.ifBlank { existing?.about.orEmpty() },
+                website = website.ifBlank { existing?.website.orEmpty() },
+                lud16 = lud16.ifBlank { existing?.lud16.orEmpty() },
+                eventCreatedAtSec = event.createdAt,
+                updatedAt = System.currentTimeMillis()
+            )
+        }
 
         /**
          * Parses both NIP-5D Napplet manifests (Kinds 35129, 15129, 5129 — which use `["x", "<sha256>"]`,

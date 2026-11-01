@@ -89,6 +89,9 @@ interface ShellDao {
     @Query("DELETE FROM installed_applets WHERE appletId IN (:appletIds) AND isInstalled = 0")
     suspend fun deleteUninstalledApplets(appletIds: List<String>)
 
+    @Query("DELETE FROM installed_applets WHERE appletId IN (:appletIds)")
+    suspend fun deleteAppletsByIds(appletIds: List<String>)
+
     @Query("UPDATE installed_applets SET isInstalled = :installed, updatedAt = :now WHERE appletId = :appletId")
     suspend fun setAppletInstalled(appletId: String, installed: Boolean, now: Long = System.currentTimeMillis())
 
@@ -142,6 +145,19 @@ interface ShellDao {
 
     @Query("DELETE FROM curated_bookmarks WHERE coordinate = :coordinate AND curatorPubkey = :curatorPubkey")
     suspend fun deleteCuratedBookmark(coordinate: String, curatorPubkey: String)
+
+    // Publisher Profiles (Kind 0 Metadata)
+    @Query("SELECT * FROM publisher_profiles")
+    fun observePublisherProfiles(): Flow<List<PublisherProfileEntity>>
+
+    @Query("SELECT * FROM publisher_profiles WHERE pubkeyHex = :pubkeyHex LIMIT 1")
+    suspend fun getPublisherProfile(pubkeyHex: String): PublisherProfileEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertPublisherProfile(profile: PublisherProfileEntity)
+
+    @Query("UPDATE nostr_notes SET authorName = :authorName, authorAvatar = CASE WHEN :authorAvatar != '' THEN :authorAvatar ELSE authorAvatar END WHERE pubkeyHex = :pubkeyHex AND isLocalUser = 0")
+    suspend fun updateCachedNotesAuthorProfile(pubkeyHex: String, authorName: String, authorAvatar: String)
 }
 
 @Database(
@@ -153,9 +169,10 @@ interface ShellDao {
         AppletStorageEntity::class,
         SignerPolicyEntity::class,
         SignerAuditEntity::class,
-        CuratedBookmarkEntity::class
+        CuratedBookmarkEntity::class,
+        PublisherProfileEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class ShellDatabase : RoomDatabase() {
@@ -184,6 +201,30 @@ abstract class ShellDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_2_3 = object : androidx.room.migration.Migration(2, 3) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `publisher_profiles` (
+                        `pubkeyHex` TEXT NOT NULL,
+                        `npub` TEXT NOT NULL,
+                        `displayName` TEXT NOT NULL,
+                        `username` TEXT NOT NULL,
+                        `nip05` TEXT NOT NULL,
+                        `pictureUrl` TEXT NOT NULL,
+                        `bannerUrl` TEXT NOT NULL,
+                        `about` TEXT NOT NULL,
+                        `website` TEXT NOT NULL,
+                        `lud16` TEXT NOT NULL,
+                        `eventCreatedAtSec` INTEGER NOT NULL,
+                        `updatedAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`pubkeyHex`)
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         fun getInstance(context: Context): ShellDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -191,7 +232,7 @@ abstract class ShellDatabase : RoomDatabase() {
                     ShellDatabase::class.java,
                     "sovereign_shell.db"
                 )
-                    .addMigrations(MIGRATION_1_2)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                     .fallbackToDestructiveMigration(true)
                     .build()
                     .also { INSTANCE = it }

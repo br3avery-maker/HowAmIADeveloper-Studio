@@ -33,6 +33,12 @@ class RelayPoolClient(
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val sockets = ConcurrentHashMap<String, WebSocket>()
+    private val ephemeralOutboxUrls = ConcurrentHashMap.newKeySet<String>()
+    private val trackedAuthorPubkeys = ConcurrentHashMap.newKeySet<String>().apply {
+        NostrCrypto.DEFAULT_FEATURED_CREATOR_PUBKEY_HEX
+            .takeIf { it.length == 64 }
+            ?.let { add(it) }
+    }
     private val connectStartTimes = ConcurrentHashMap<String, Long>()
     private val pendingOkCallbacks = ConcurrentHashMap<String, CompletableDeferred<RelayPublishReceipt>>()
     private val queryBuffers = ConcurrentHashMap<String, MutableList<NostrEvent>>()
@@ -41,15 +47,15 @@ class RelayPoolClient(
     private val _relayStatuses = MutableStateFlow<Map<String, RelayStatusInfo>>(emptyMap())
     val relayStatuses: StateFlow<Map<String, RelayStatusInfo>> = _relayStatuses.asStateFlow()
 
-    private val _incomingEvents = MutableSharedFlow<Pair<String, NostrEvent>>(extraBufferCapacity = 512)
+    private val _incomingEvents = MutableSharedFlow<Pair<String, NostrEvent>>(extraBufferCapacity = 768)
     val incomingEvents: SharedFlow<Pair<String, NostrEvent>> = _incomingEvents.asSharedFlow()
 
     fun syncRelays(urls: List<String>) {
         val normalizedSet = urls.map { normalizeRelayUrl(it) }.filter { it.isNotBlank() }.toSet()
-        // Remove sockets no longer configured
+        // Remove user-configured sockets no longer present (keep capped ephemeral outbox sockets)
         val existingKeys = sockets.keys.toList()
         for (existing in existingKeys) {
-            if (existing !in normalizedSet) {
+            if (existing !in normalizedSet && existing !in ephemeralOutboxUrls) {
                 disconnectRelay(existing, removeFromMap = true)
             }
         }
@@ -62,28 +68,37 @@ class RelayPoolClient(
         }
     }
 
-    fun connectRelay(rawUrl: String) {
+    fun connectRelay(rawUrl: String, isEphemeralOutbox: Boolean = false) {
         val url = normalizeRelayUrl(rawUrl)
         if (url.isBlank()) return
+        if (isEphemeralOutbox) {
+            if (sockets.containsKey(url)) return
+            if (ephemeralOutboxUrls.size >= 6) return
+            ephemeralOutboxUrls.add(url)
+        }
         sockets.remove(url)?.cancel()
         connectStartTimes[url] = System.currentTimeMillis()
-        updateStatus(url) {
-            RelayStatusInfo(
-                url = url,
-                status = RelayConnectionStatus.CONNECTING,
-                lastMessage = "Opening WebSocket…"
-            )
+        if (!isEphemeralOutbox) {
+            updateStatus(url) {
+                RelayStatusInfo(
+                    url = url,
+                    status = RelayConnectionStatus.CONNECTING,
+                    lastMessage = "Opening WebSocket…"
+                )
+            }
         }
 
         val request = runCatching {
             Request.Builder().url(url).build()
         }.getOrElse { err ->
-            updateStatus(url) {
-                RelayStatusInfo(
-                    url = url,
-                    status = RelayConnectionStatus.ERROR,
-                    lastMessage = err.message ?: "Invalid relay URL"
-                )
+            if (!isEphemeralOutbox) {
+                updateStatus(url) {
+                    RelayStatusInfo(
+                        url = url,
+                        status = RelayConnectionStatus.ERROR,
+                        lastMessage = err.message ?: "Invalid relay URL"
+                    )
+                }
             }
             return
         }
@@ -91,90 +106,125 @@ class RelayPoolClient(
         val ws = okHttpClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 val rtt = System.currentTimeMillis() - (connectStartTimes[url] ?: System.currentTimeMillis())
-                updateStatus(url) { prev ->
-                    (prev ?: RelayStatusInfo(url = url)).copy(
-                        status = RelayConnectionStatus.CONNECTED,
-                        latencyMs = rtt.coerceAtLeast(1L),
-                        lastMessage = "Connected (${rtt}ms)"
-                    )
+                if (!isEphemeralOutbox) {
+                    updateStatus(url) { prev ->
+                        (prev ?: RelayStatusInfo(url = url)).copy(
+                            status = RelayConnectionStatus.CONNECTED,
+                            latencyMs = rtt.coerceAtLeast(1L),
+                            lastMessage = "Connected (${rtt}ms)"
+                        )
+                    }
                 }
-                // Split subscriptions so Kind 15128 root spam never starves NIP-5D Napplets (35129/15129/5129)
                 val suffix = url.hashCode().toUInt().toString(16)
-                val filterNotes = JSONObject().apply {
-                    put("kinds", JSONArray().put(NostrKinds.TEXT_NOTE))
-                    put("limit", 20)
-                }
-                val filterNapplets = JSONObject().apply {
-                    put(
-                        "kinds",
-                        JSONArray()
-                            .put(NostrKinds.NAPPLET_NAMED)
-                            .put(NostrKinds.NAPPLET_ROOT)
-                            .put(NostrKinds.NAPPLET_SNAPSHOT)
+
+                // 1. Priority subscription for tracked/featured creators (including user's pubkey)
+                sendTrackedAuthorsSubscription(webSocket, "disc_tracked_$suffix")
+
+                if (!isEphemeralOutbox) {
+                    // 2. Split global subscriptions so Kind 15128 root spam never starves NIP-5D or Named Nsites
+                    val filterNotes = JSONObject().apply {
+                        put("kinds", JSONArray().put(NostrKinds.TEXT_NOTE))
+                        put("limit", 20)
+                    }
+                    val filterNapplets = JSONObject().apply {
+                        put(
+                            "kinds",
+                            JSONArray()
+                                .put(NostrKinds.NAPPLET_NAMED)
+                                .put(NostrKinds.NAPPLET_ROOT)
+                                .put(NostrKinds.NAPPLET_SNAPSHOT)
+                        )
+                        put("limit", 100)
+                    }
+                    val filterNamedNsites = JSONObject().apply {
+                        put("kinds", JSONArray().put(NostrKinds.NSITE_NAMED))
+                        put("limit", 80)
+                    }
+                    val filterRootNsites = JSONObject().apply {
+                        put("kinds", JSONArray().put(NostrKinds.NSITE_ROOT))
+                        put("limit", 35)
+                    }
+                    val filterLegacyRootNsites = JSONObject().apply {
+                        put("kinds", JSONArray().put(NostrKinds.NSITE_LEGACY_FILE))
+                        put("#d", JSONArray().put("/index.html").put("index.html"))
+                        put("limit", 25)
+                    }
+                    val filterNip51Lists = JSONObject().apply {
+                        put(
+                            "kinds",
+                            JSONArray()
+                                .put(NostrKinds.NIP51_BOOKMARK_SET)
+                                .put(NostrKinds.NIP51_CATEGORIZED_LIST)
+                        )
+                        put("limit", 40)
+                    }
+                    webSocket.send(
+                        JSONArray().put("REQ").put("shell_nap_$suffix").put(filterNapplets).toString()
                     )
-                    put("limit", 100)
-                }
-                val filterNamedNsites = JSONObject().apply {
-                    put("kinds", JSONArray().put(NostrKinds.NSITE_NAMED))
-                    put("limit", 60)
-                }
-                val filterRootNsites = JSONObject().apply {
-                    put("kinds", JSONArray().put(NostrKinds.NSITE_ROOT))
-                    put("limit", 35)
-                }
-                val filterNip51Lists = JSONObject().apply {
-                    put(
-                        "kinds",
-                        JSONArray()
-                            .put(NostrKinds.NIP51_BOOKMARK_SET)
-                            .put(NostrKinds.NIP51_CATEGORIZED_LIST)
+                    webSocket.send(
+                        JSONArray().put("REQ").put("shell_nsite_$suffix")
+                            .put(filterNamedNsites)
+                            .put(filterRootNsites)
+                            .put(filterLegacyRootNsites)
+                            .toString()
                     )
-                    put("limit", 40)
+                    webSocket.send(
+                        JSONArray().put("REQ").put("shell_nip51_$suffix").put(filterNip51Lists).toString()
+                    )
+                    webSocket.send(
+                        JSONArray().put("REQ").put("shell_notes_$suffix").put(filterNotes).toString()
+                    )
                 }
-                webSocket.send(
-                    JSONArray().put("REQ").put("shell_nap_$suffix").put(filterNapplets).toString()
-                )
-                webSocket.send(
-                    JSONArray().put("REQ").put("shell_nsite_$suffix").put(filterNamedNsites).put(filterRootNsites).toString()
-                )
-                webSocket.send(
-                    JSONArray().put("REQ").put("shell_nip51_$suffix").put(filterNip51Lists).toString()
-                )
-                webSocket.send(
-                    JSONArray().put("REQ").put("shell_notes_$suffix").put(filterNotes).toString()
-                )
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                handleRelayMessage(url, webSocket, text)
+                handleRelayMessage(url, webSocket, text, isEphemeralOutbox)
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
                 webSocket.close(code, reason)
                 sockets.remove(url)
-                updateStatus(url) { prev ->
-                    (prev ?: RelayStatusInfo(url = url)).copy(
-                        status = RelayConnectionStatus.DISCONNECTED,
-                        lastMessage = reason.ifBlank { "Closed ($code)" }
-                    )
+                if (!isEphemeralOutbox) {
+                    updateStatus(url) { prev ->
+                        (prev ?: RelayStatusInfo(url = url)).copy(
+                            status = RelayConnectionStatus.DISCONNECTED,
+                            lastMessage = reason.ifBlank { "Closed ($code)" }
+                        )
+                    }
                 }
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 sockets.remove(url)
-                updateStatus(url) { prev ->
-                    (prev ?: RelayStatusInfo(url = url)).copy(
-                        status = RelayConnectionStatus.ERROR,
-                        lastMessage = t.localizedMessage?.take(60) ?: "Connection failed"
-                    )
+                if (!isEphemeralOutbox) {
+                    updateStatus(url) { prev ->
+                        (prev ?: RelayStatusInfo(url = url)).copy(
+                            status = RelayConnectionStatus.ERROR,
+                            lastMessage = t.localizedMessage?.take(60) ?: "Connection failed"
+                        )
+                    }
                 }
             }
         })
         sockets[url] = ws
     }
 
+    private fun sendTrackedAuthorsSubscription(ws: WebSocket, subId: String) {
+        val authors = trackedAuthorPubkeys.filter { it.length == 64 }.distinct()
+        if (authors.isEmpty()) return
+        val (manifestsFilter, metaAndOutboxFilter) = buildAuthorBundleFilters(authors)
+        val msg = JSONArray()
+            .put("REQ")
+            .put(subId)
+            .put(manifestsFilter)
+            .put(metaAndOutboxFilter)
+            .toString()
+        ws.send(msg)
+    }
+
     fun disconnectRelay(rawUrl: String, removeFromMap: Boolean = false) {
         val url = normalizeRelayUrl(rawUrl)
+        ephemeralOutboxUrls.remove(url)
         sockets.remove(url)?.close(1000, "Removed by user")
         if (removeFromMap) {
             _relayStatuses.update { it - url }
@@ -189,14 +239,54 @@ class RelayPoolClient(
     }
 
     fun requestAuthorMetadata(pubkeyHex: String) {
-        val subId = "meta_${pubkeyHex.take(10)}"
-        val filter = JSONObject().apply {
-            put("kinds", JSONArray().put(0))
-            put("authors", JSONArray().put(pubkeyHex))
-            put("limit", 1)
+        requestAuthorsMetadata(listOf(pubkeyHex))
+    }
+
+    fun requestAuthorsMetadata(pubkeys: Collection<String>) {
+        val clean = pubkeys.map { it.trim().lowercase() }
+            .filter { it.length == 64 && it.all { ch -> ch.isDigit() || ch in 'a'..'f' } }
+            .distinct()
+        if (clean.isEmpty()) return
+
+        clean.chunked(40).forEach { chunk ->
+            val subId = "meta_${UUID.randomUUID().toString().take(8)}"
+            val authorsArr = JSONArray()
+            chunk.forEach { authorsArr.put(it) }
+            val filter = JSONObject().apply {
+                put("kinds", JSONArray().put(NostrKinds.METADATA))
+                put("authors", authorsArr)
+                put("limit", chunk.size * 2)
+            }
+            val msg = JSONArray().put("REQ").put(subId).put(filter).toString()
+            sockets.values.forEach { it.send(msg) }
         }
-        val msg = JSONArray().put("REQ").put(subId).put(filter).toString()
-        sockets.values.forEach { it.send(msg) }
+    }
+
+    /**
+     * Registers `pubkeyHex` as a tracked creator and immediately queries all Nsites, Napplets,
+     * Kind 0 metadata, NIP-65 outbox relays, and Blossom server lists across active + outbox relays.
+     */
+    fun trackAndQueryAuthor(pubkeyHex: String, extraOutboxRelays: List<String> = emptyList()) {
+        val pk = pubkeyHex.trim().lowercase()
+        if (pk.length != 64) return
+        trackedAuthorPubkeys.add(pk)
+
+        extraOutboxRelays.forEach { rawUrl ->
+            val norm = normalizeRelayUrl(rawUrl)
+            if (norm.startsWith("wss://") && !sockets.containsKey(norm)) {
+                connectRelay(norm, isEphemeralOutbox = true)
+            }
+        }
+
+        val subId = "disc_author_${UUID.randomUUID().toString().take(8)}"
+        val (manifestsFilter, metaAndOutboxFilter) = buildAuthorBundleFilters(listOf(pk))
+        val msg = JSONArray()
+            .put("REQ")
+            .put(subId)
+            .put(manifestsFilter)
+            .put(metaAndOutboxFilter)
+            .toString()
+        sockets.values.forEach { ws -> ws.send(msg) }
     }
 
     fun refreshDiscoveryCatalog() {
@@ -213,7 +303,12 @@ class RelayPoolClient(
         }
         val filterNamedNsites = JSONObject().apply {
             put("kinds", JSONArray().put(NostrKinds.NSITE_NAMED))
-            put("limit", 60)
+            put("limit", 80)
+        }
+        val filterLegacyRootNsites = JSONObject().apply {
+            put("kinds", JSONArray().put(NostrKinds.NSITE_LEGACY_FILE))
+            put("#d", JSONArray().put("/index.html").put("index.html"))
+            put("limit", 25)
         }
         val filterNip51 = JSONObject().apply {
             put(
@@ -225,14 +320,23 @@ class RelayPoolClient(
             put("limit", 40)
         }
         val napMsg = JSONArray().put("REQ").put("disc_nap_$token").put(filterNapplets).toString()
-        val nsiteMsg = JSONArray().put("REQ").put("disc_ns_$token").put(filterNamedNsites).toString()
+        val nsiteMsg = JSONArray()
+            .put("REQ")
+            .put("disc_ns_$token")
+            .put(filterNamedNsites)
+            .put(filterLegacyRootNsites)
+            .toString()
         val nip51Msg = JSONArray().put("REQ").put("disc_list_$token").put(filterNip51).toString()
+
         sockets.forEach { (url, ws) ->
             val st = _relayStatuses.value[url]?.status
-            if (st == RelayConnectionStatus.CONNECTED) {
-                ws.send(napMsg)
-                ws.send(nsiteMsg)
-                ws.send(nip51Msg)
+            if (st == RelayConnectionStatus.CONNECTED || url in ephemeralOutboxUrls) {
+                sendTrackedAuthorsSubscription(ws, "disc_tracked_$token")
+                if (url !in ephemeralOutboxUrls) {
+                    ws.send(napMsg)
+                    ws.send(nsiteMsg)
+                    ws.send(nip51Msg)
+                }
             } else if (st != RelayConnectionStatus.CONNECTING) {
                 connectRelay(url)
             }
@@ -275,18 +379,12 @@ class RelayPoolClient(
             put("limit", 40)
         }
         val reqMsg = JSONArray().put("REQ").put(subId).put(filter).toString()
-        sockets.forEach { (url, ws) ->
-            if (_relayStatuses.value[url]?.status == RelayConnectionStatus.CONNECTED) {
-                ws.send(reqMsg)
-            }
-        }
+        sockets.values.forEach { ws -> ws.send(reqMsg) }
     }
 
     suspend fun queryEventsOnce(filterJson: JSONObject, timeoutMs: Long = 3200L): List<NostrEvent> {
-        val activeEntries = sockets.entries.filter {
-            _relayStatuses.value[it.key]?.status == RelayConnectionStatus.CONNECTED
-        }
-        if (activeEntries.isEmpty()) return emptyList()
+        val activeSockets = sockets.values.toList()
+        if (activeSockets.isEmpty()) return emptyList()
 
         val subId = "nap_q_${UUID.randomUUID().toString().take(8)}"
         val buffer = ConcurrentHashMap.newKeySet<NostrEvent>()
@@ -296,12 +394,12 @@ class RelayPoolClient(
         queryEoseSignals[subId] = signal
 
         val reqText = JSONArray().put("REQ").put(subId).put(filterJson).toString()
-        activeEntries.forEach { (_, ws) -> ws.send(reqText) }
+        activeSockets.forEach { ws -> ws.send(reqText) }
 
         withTimeoutOrNull(timeoutMs) { signal.await() }
 
         val closeText = JSONArray().put("CLOSE").put(subId).toString()
-        activeEntries.forEach { (_, ws) -> ws.send(closeText) }
+        activeSockets.forEach { ws -> ws.send(closeText) }
         queryEoseSignals.remove(subId)
         val collected = queryBuffers.remove(subId)?.toList().orEmpty()
         collected.forEach { buffer.add(it) }
@@ -315,7 +413,6 @@ class RelayPoolClient(
             return RelayPublishSummary(event, emptyList())
         }
 
-        // Ensure disconnected relays attempt reconnect
         targetUrls.forEach { url ->
             if (sockets[url] == null) {
                 connectRelay(url)
@@ -359,7 +456,12 @@ class RelayPoolClient(
         return RelayPublishSummary(event = event, receipts = receipts)
     }
 
-    private fun handleRelayMessage(url: String, ws: WebSocket, rawText: String) {
+    private fun handleRelayMessage(
+        url: String,
+        ws: WebSocket,
+        rawText: String,
+        isEphemeralOutbox: Boolean
+    ) {
         runCatching {
             val arr = JSONArray(rawText)
             when (arr.optString(0)) {
@@ -367,11 +469,13 @@ class RelayPoolClient(
                     val subId = arr.optString(1)
                     val evObj = arr.optJSONObject(2) ?: return
                     val event = NostrEvent.fromJson(evObj) ?: return
-                    updateStatus(url) { prev ->
-                        (prev ?: RelayStatusInfo(url = url)).copy(
-                            status = RelayConnectionStatus.CONNECTED,
-                            eventsReceived = (prev?.eventsReceived ?: 0) + 1
-                        )
+                    if (!isEphemeralOutbox) {
+                        updateStatus(url) { prev ->
+                            (prev ?: RelayStatusInfo(url = url)).copy(
+                                status = RelayConnectionStatus.CONNECTED,
+                                eventsReceived = (prev?.eventsReceived ?: 0) + 1
+                            )
+                        }
                     }
                     queryBuffers[subId]?.add(event)
                     scope.launch { _incomingEvents.emit(url to event) }
@@ -397,9 +501,11 @@ class RelayPoolClient(
                     queryEoseSignals[subId]?.complete(Unit)
                 }
                 "NOTICE" -> {
-                    val notice = arr.optString(1)
-                    updateStatus(url) { prev ->
-                        (prev ?: RelayStatusInfo(url = url)).copy(lastMessage = "Notice: ${notice.take(50)}")
+                    if (!isEphemeralOutbox) {
+                        val notice = arr.optString(1)
+                        updateStatus(url) { prev ->
+                            (prev ?: RelayStatusInfo(url = url)).copy(lastMessage = "Notice: ${notice.take(50)}")
+                        }
                     }
                 }
             }
@@ -419,13 +525,58 @@ class RelayPoolClient(
             "wss://relay.primal.net"
         )
 
-        val DEFAULT_RELAYS = listOf(
+        val LEGACY_FIVE_RELAYS = setOf(
             "wss://relay.damus.io",
             "wss://nos.lol",
             "wss://relay.primal.net",
             "wss://relay.nostr.band",
             "wss://offchain.pub"
         )
+
+        val DEFAULT_RELAYS = listOf(
+            "wss://relay.damus.io",
+            "wss://nos.lol",
+            "wss://relay.primal.net",
+            "wss://purplepag.es",
+            "wss://relay.nsite.lol",
+            "wss://relay.nostr.band",
+            "wss://offchain.pub"
+        )
+
+        fun buildAuthorBundleFilters(authorPubkeysHex: List<String>): Pair<JSONObject, JSONObject> {
+            val authorsArr = JSONArray()
+            authorPubkeysHex.forEach { authorsArr.put(it.lowercase()) }
+
+            val manifestsFilter = JSONObject().apply {
+                put("authors", authorsArr)
+                put(
+                    "kinds",
+                    JSONArray()
+                        .put(NostrKinds.NSITE_NAMED)
+                        .put(NostrKinds.NSITE_ROOT)
+                        .put(NostrKinds.NSITE_LEGACY_FILE)
+                        .put(NostrKinds.NAPPLET_NAMED)
+                        .put(NostrKinds.NAPPLET_ROOT)
+                        .put(NostrKinds.NAPPLET_SNAPSHOT)
+                )
+                put("limit", 100)
+            }
+
+            val metaAndOutboxFilter = JSONObject().apply {
+                put("authors", authorsArr)
+                put(
+                    "kinds",
+                    JSONArray()
+                        .put(NostrKinds.METADATA)
+                        .put(NostrKinds.RELAY_LIST)
+                        .put(NostrKinds.USER_BLOSSOM_SERVERS)
+                        .put(NostrKinds.NIP51_BOOKMARK_SET)
+                        .put(NostrKinds.NIP51_CATEGORIZED_LIST)
+                )
+                put("limit", 40)
+            }
+            return manifestsFilter to metaAndOutboxFilter
+        }
 
         fun normalizeRelayUrl(raw: String): String {
             val trimmed = raw.trim().trimEnd('/')
