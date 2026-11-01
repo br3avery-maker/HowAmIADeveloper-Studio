@@ -111,4 +111,53 @@ class ExampleUnitTest {
             )
         )
     }
+
+    @Test
+    fun nip5aPubkeyBase36AndNamedNsiteGatewayUrl_produceValidSingleLabelSubdomain() {
+        val targetNpub = "npub1s06cx40d060vq887lj8hj6hku5a6hzch5ylkzj03qv86dn02tqhs0wzl0d"
+        val pubHex = NostrCrypto.decodeNpubToHex(targetNpub)!!
+        assertEquals(64, pubHex.length)
+
+        val pubB36 = NostrCrypto.encodePubkeyBase36(pubHex)
+        assertEquals(50, pubB36.length)
+        assertTrue(pubB36.all { it in '0'..'9' || it in 'a'..'z' })
+        assertEquals(pubHex, NostrCrypto.decodePubkeyBase36(pubB36))
+
+        // Leading-zero 32-byte pubkey must still be fixed-width 50 chars so <pubkeyB36><dTag> splits at index 50
+        val leadingZeroHex = "0000001234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+        val paddedB36 = NostrCrypto.encodePubkeyBase36(leadingZeroHex)
+        assertEquals(50, paddedB36.length)
+        assertTrue(paddedB36.startsWith("0"))
+        assertEquals(leadingZeroHex, NostrCrypto.decodePubkeyBase36(paddedB36))
+
+        // Max 256-bit value must also fit in 50 base36 chars
+        val maxHex = "f".repeat(64)
+        val maxB36 = NostrCrypto.encodePubkeyBase36(maxHex)
+        assertEquals(50, maxB36.length)
+        assertEquals(maxHex, NostrCrypto.decodePubkeyBase36(maxB36))
+
+        // Verify 2048-link resolves to a single-label *.nsite.lol URL (59-char label, zero extra dots)
+        val namedUrl = com.example.nostr.ExternalSiteLauncher.buildNip5aGatewayUrl(
+            kind = NostrKinds.NSITE_NAMED,
+            authorPubkeyHex = pubHex,
+            authorNpub = targetNpub,
+            dTag = "2048-link"
+        )!!
+        assertEquals("https://${pubB36}2048-link.nsite.lol/", namedUrl)
+
+        val host = java.net.URI(namedUrl).host
+        val labels = host.split('.')
+        assertEquals("Wildcard *.nsite.lol requires exactly 3 host labels (<sublabel>.nsite.lol)", 3, labels.size)
+        assertEquals(59, labels[0].length)
+        assertEquals(pubHex, NostrCrypto.decodePubkeyBase36(labels[0].substring(0, 50)))
+        assertEquals("2048-link", labels[0].substring(50))
+
+        // Legacy multi-level <dTag>.<npub>.nsite.lol URLs are automatically repaired
+        val legacyBroken = "https://2048-link.$targetNpub.nsite.lol"
+        assertEquals(
+            "https://${pubB36}2048-link.nsite.lol/",
+            com.example.nostr.ExternalSiteLauncher.normalizeGatewayUrl(legacyBroken)
+        )
+    }
 }
+

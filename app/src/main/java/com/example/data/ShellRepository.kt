@@ -3,6 +3,7 @@ package com.example.data
 import android.content.Context
 import android.net.Uri
 import com.example.nostr.BlossomClient
+import com.example.nostr.ExternalSiteLauncher
 import com.example.nostr.KeyVaultManager
 import com.example.nostr.NostrCrypto
 import com.example.nostr.NostrEvent
@@ -672,10 +673,15 @@ class ShellRepository(
             )
         )
 
-        val gatewayUrl = if (targetKind == NostrKinds.NSITE_ROOT) {
-            "https://${active.npub}.nsite.lol/"
-        } else {
-            "https://$cleanDTag.${active.npub}.nsite.lol/"
+        val gatewayUrl = when (targetKind) {
+            NostrKinds.NSITE_ROOT -> "https://${active.npub.lowercase()}.nsite.lol/"
+            NostrKinds.NSITE_NAMED -> ExternalSiteLauncher.buildNip5aGatewayUrl(
+                kind = NostrKinds.NSITE_NAMED,
+                authorPubkeyHex = active.pubkeyHex,
+                authorNpub = active.npub,
+                dTag = cleanDTag
+            ) ?: htmlRes.url
+            else -> htmlRes.url
         }
 
         PublishDeploymentReport(
@@ -1157,13 +1163,17 @@ class ShellRepository(
                 .firstOrNull { it.size >= 2 && (it[0] == "x" || it[0] == "sha256") && SHA256_HEX_REGEX.matches(it[1].trim()) }
                 ?.get(1)?.trim().orEmpty()
 
-            val directUrl = event.tags
+            val urlTagNames = if (isNsite) setOf("url", "u") else setOf("url", "u", "r")
+            val rawDirectUrl = event.tags
                 .firstOrNull {
                     it.size >= 2 &&
-                        (it[0] == "url" || it[0] == "u" || it[0] == "r") &&
+                        it[0] in urlTagNames &&
                         (it[1].startsWith("https://", ignoreCase = true) || it[1].startsWith("http://", ignoreCase = true))
                 }
                 ?.get(1)?.trim().orEmpty()
+            val directUrl = if (rawDirectUrl.isNotBlank()) {
+                ExternalSiteLauncher.normalizeGatewayUrl(rawDirectUrl).orEmpty()
+            } else ""
 
             val trimmedContent = event.content.trim()
             val contentLooksLikeHtml = trimmedContent.startsWith("<!DOCTYPE", ignoreCase = true) ||

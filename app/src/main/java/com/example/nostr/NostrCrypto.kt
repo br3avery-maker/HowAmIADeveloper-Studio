@@ -384,6 +384,37 @@ object NostrCrypto {
     fun encodeNpub(pubKeyHex: String): String = encodeBech32("npub", pubKeyHex.hexToBytes())
     fun encodeNsec(privKeyHex: String): String = encodeBech32("nsec", privKeyHex.hexToBytes())
 
+    fun decodeNpubToHex(npub: String): String? = runCatching {
+        val (hrp, bytes) = decodeBech32(npub)
+        if (hrp == "npub" && bytes.size == 32) bytes.toHex() else null
+    }.getOrNull()
+
+    /**
+     * NIP-5A `pubkeyB36` encoder: encodes a raw 32-byte Nostr public key as a fixed-width
+     * 50-character lowercase base36 string (`0-9a-z`), left-padded with `'0'` so `<pubkeyB36><dTag>`
+     * fits inside a single 63-character DNS label (`*.nsite.lol`) with a deterministic 50-char split.
+     */
+    fun encodePubkeyBase36(pubKeyHex: String): String {
+        val pubBytes = pubKeyHex.trim().lowercase().hexToBytes()
+        require(pubBytes.size == 32) { "Public key must be 32 bytes (64 hex chars)" }
+        return BigInteger(1, pubBytes).toString(36).lowercase().padStart(50, '0')
+    }
+
+    /**
+     * Decodes a 50-character lowercase base36 NIP-5A `pubkeyB36` back into a 64-char hex pubkey.
+     */
+    fun decodePubkeyBase36(pubkeyB36: String): String {
+        val cleaned = pubkeyB36.trim().lowercase()
+        require(cleaned.length == 50 && cleaned.all { it in '0'..'9' || it in 'a'..'z' }) {
+            "pubkeyB36 must be 50 lowercase base36 characters"
+        }
+        val value = BigInteger(cleaned, 36)
+        require(value >= BigInteger.ZERO && value.bitLength() <= 256) {
+            "pubkeyB36 value exceeds 32-byte unsigned range"
+        }
+        return value.toBytes32().toHex()
+    }
+
     /**
      * NIP-19 TLV Bech32 coordinate encoder (`naddr1...`) for addressable Napplets (35129) & Nsites (35128).
      */

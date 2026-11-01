@@ -290,7 +290,7 @@ class ExampleRobolectricTest {
         val publisher = NostrCrypto.generateKeyPair()
         val gameSha = NostrCrypto.sha256Hex("<!DOCTYPE html><html><body>2048 Link</body></html>")
 
-        // Named NIP-5A Nsite (Kind 35128) -> https://<dTag>.<npub>.nsite.lol/
+        // Named NIP-5A Nsite (Kind 35128) -> single-label https://<pubkeyB36><dTag>.nsite.lol/
         val namedNsite = InstalledAppletEntity(
             appletId = "35128:${publisher.pubKeyHex}:2048-link",
             kind = NostrKinds.NSITE_NAMED,
@@ -305,8 +305,9 @@ class ExampleRobolectricTest {
             isNsite = true,
             enableNip07 = true
         )
+        val expectedPubB36 = NostrCrypto.encodePubkeyBase36(publisher.pubKeyHex)
         assertEquals(
-            "https://2048-link.${publisher.npub}.nsite.lol/",
+            "https://${expectedPubB36}2048-link.nsite.lol/",
             ExternalSiteLauncher.resolveExternalUrl(namedNsite)
         )
 
