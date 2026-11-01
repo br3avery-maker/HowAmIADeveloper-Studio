@@ -835,6 +835,8 @@ fun ProtocolBadgePill(isNsite: Boolean, nip07: Boolean) {
             text = label,
             style = MaterialTheme.typography.labelSmall,
             color = if (isNsite) ZineBoneCream else BreLightPink,
+            maxLines = 1,
+            softWrap = false,
             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
         )
     }

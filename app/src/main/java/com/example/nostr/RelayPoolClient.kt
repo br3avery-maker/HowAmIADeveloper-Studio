@@ -41,7 +41,7 @@ class RelayPoolClient(
     private val _relayStatuses = MutableStateFlow<Map<String, RelayStatusInfo>>(emptyMap())
     val relayStatuses: StateFlow<Map<String, RelayStatusInfo>> = _relayStatuses.asStateFlow()
 
-    private val _incomingEvents = MutableSharedFlow<Pair<String, NostrEvent>>(extraBufferCapacity = 128)
+    private val _incomingEvents = MutableSharedFlow<Pair<String, NostrEvent>>(extraBufferCapacity = 512)
     val incomingEvents: SharedFlow<Pair<String, NostrEvent>> = _incomingEvents.asSharedFlow()
 
     fun syncRelays(urls: List<String>) {
@@ -98,18 +98,39 @@ class RelayPoolClient(
                         lastMessage = "Connected (${rtt}ms)"
                     )
                 }
-                // Subscribe to recent Kind 1 notes and Kind 35129/35128/15128 manifests
-                val subId = "shell_feed_${url.hashCode().toUInt().toString(16)}"
+                // Split subscriptions so Kind 15128 root spam never starves NIP-5D Napplets (35129/15129/5129)
+                val suffix = url.hashCode().toUInt().toString(16)
                 val filterNotes = JSONObject().apply {
-                    put("kinds", JSONArray().put(1))
+                    put("kinds", JSONArray().put(NostrKinds.TEXT_NOTE))
                     put("limit", 20)
                 }
-                val filterApps = JSONObject().apply {
-                    put("kinds", JSONArray().put(35129).put(35128).put(15128).put(15129))
-                    put("limit", 30)
+                val filterNapplets = JSONObject().apply {
+                    put(
+                        "kinds",
+                        JSONArray()
+                            .put(NostrKinds.NAPPLET_NAMED)
+                            .put(NostrKinds.NAPPLET_ROOT)
+                            .put(NostrKinds.NAPPLET_SNAPSHOT)
+                    )
+                    put("limit", 100)
                 }
-                val reqMsg = JSONArray().put("REQ").put(subId).put(filterNotes).put(filterApps).toString()
-                webSocket.send(reqMsg)
+                val filterNamedNsites = JSONObject().apply {
+                    put("kinds", JSONArray().put(NostrKinds.NSITE_NAMED))
+                    put("limit", 60)
+                }
+                val filterRootNsites = JSONObject().apply {
+                    put("kinds", JSONArray().put(NostrKinds.NSITE_ROOT))
+                    put("limit", 35)
+                }
+                webSocket.send(
+                    JSONArray().put("REQ").put("shell_nap_$suffix").put(filterNapplets).toString()
+                )
+                webSocket.send(
+                    JSONArray().put("REQ").put("shell_nsite_$suffix").put(filterNamedNsites).put(filterRootNsites).toString()
+                )
+                webSocket.send(
+                    JSONArray().put("REQ").put("shell_notes_$suffix").put(filterNotes).toString()
+                )
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -164,6 +185,35 @@ class RelayPoolClient(
         }
         val msg = JSONArray().put("REQ").put(subId).put(filter).toString()
         sockets.values.forEach { it.send(msg) }
+    }
+
+    fun refreshDiscoveryCatalog() {
+        val token = UUID.randomUUID().toString().take(6)
+        val filterNapplets = JSONObject().apply {
+            put(
+                "kinds",
+                JSONArray()
+                    .put(NostrKinds.NAPPLET_NAMED)
+                    .put(NostrKinds.NAPPLET_ROOT)
+                    .put(NostrKinds.NAPPLET_SNAPSHOT)
+            )
+            put("limit", 100)
+        }
+        val filterNamedNsites = JSONObject().apply {
+            put("kinds", JSONArray().put(NostrKinds.NSITE_NAMED))
+            put("limit", 60)
+        }
+        val napMsg = JSONArray().put("REQ").put("disc_nap_$token").put(filterNapplets).toString()
+        val nsiteMsg = JSONArray().put("REQ").put("disc_ns_$token").put(filterNamedNsites).toString()
+        sockets.forEach { (url, ws) ->
+            val st = _relayStatuses.value[url]?.status
+            if (st == RelayConnectionStatus.CONNECTED) {
+                ws.send(napMsg)
+                ws.send(nsiteMsg)
+            } else if (st != RelayConnectionStatus.CONNECTING) {
+                connectRelay(url)
+            }
+        }
     }
 
     suspend fun queryEventsOnce(filterJson: JSONObject, timeoutMs: Long = 3200L): List<NostrEvent> {
@@ -275,7 +325,7 @@ class RelayPoolClient(
                 }
                 "EOSE" -> {
                     val subId = arr.optString(1)
-                    if (subId.startsWith("meta_")) {
+                    if (subId.startsWith("meta_") || subId.startsWith("disc_")) {
                         ws.send(JSONArray().put("CLOSE").put(subId).toString())
                     }
                     queryEoseSignals[subId]?.complete(Unit)
@@ -297,10 +347,18 @@ class RelayPoolClient(
     }
 
     companion object {
-        val DEFAULT_RELAYS = listOf(
+        val LEGACY_INITIAL_RELAYS = setOf(
             "wss://relay.damus.io",
             "wss://nos.lol",
             "wss://relay.primal.net"
+        )
+
+        val DEFAULT_RELAYS = listOf(
+            "wss://relay.damus.io",
+            "wss://nos.lol",
+            "wss://relay.primal.net",
+            "wss://relay.nostr.band",
+            "wss://offchain.pub"
         )
 
         fun normalizeRelayUrl(raw: String): String {

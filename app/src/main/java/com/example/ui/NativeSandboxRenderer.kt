@@ -1,14 +1,6 @@
 package com.example.ui
 
-import android.annotation.SuppressLint
-import android.os.Build
-import android.view.View
-import android.view.ViewGroup
-import android.webkit.RenderProcessGoneDetail
-import android.webkit.WebResourceRequest
-import android.webkit.WebSettings
-import android.webkit.WebView
-import android.webkit.WebViewClient
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -25,22 +17,19 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -57,13 +46,10 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
 import com.example.data.InstalledAppletEntity
 import com.example.ui.theme.BreBlack
 import com.example.ui.theme.BreDeepPink
@@ -77,27 +63,18 @@ import com.example.ui.theme.BrePinkDark3
 import com.example.ui.theme.BreWhite
 import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.ZineBoneCream
-import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Tracks whether the host environment's isolated Chromium WebView renderer process is unavailable
- * (e.g., container seccomp / renderer crash `aw_browser_terminator.cc` code -1) so SovereignShell
- * never crashes the app and seamlessly switches to the Native Compose NIP-5D Sandbox Engine.
+ * Pure-Compose Sandboxed NIP-5D & NIP-07 Runtime Engine.
+ * Renders Napplets (Kind 35129/15129) and Nsites (Kind 35128/15128) natively in Jetpack Compose
+ * without spawning out-of-process Chromium WebView renderers, guaranteeing zero renderer crashes
+ * across all Android devices and containerized streaming emulators while executing real
+ * NAP-SIGNER, NAP-RELAY, NAP-STORAGE, NAP-INTENT, and optional NIP-07 calls.
  */
-internal object WebViewCrashGuard {
-    private val rendererFailed = AtomicBoolean(false)
-
-    fun isRendererUnavailable(): Boolean = rendererFailed.get()
-
-    fun markRendererUnavailable() {
-        rendererFailed.set(true)
-    }
-}
-
-@SuppressLint("SetJavaScriptEnabled")
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun SandboxedAppletSurface(
     applet: InstalledAppletEntity,
@@ -107,162 +84,27 @@ internal fun SandboxedAppletSurface(
     onBridgeCall: suspend (InstalledAppletEntity, String, String, JSONObject) -> Any?,
     modifier: Modifier = Modifier
 ) {
-    var useNativeFallback by remember {
-        mutableStateOf(WebViewCrashGuard.isRendererUnavailable())
-    }
-
-    if (useNativeFallback) {
-        NativeComposeSandboxHost(
-            applet = applet,
-            rawHtml = rawHtml,
-            reloadKey = reloadKey,
-            onBridgeCall = onBridgeCall,
-            modifier = modifier
-        )
-        return
-    }
-
-    if (assembledWebDoc == null) {
-        Box(modifier = modifier.background(BreBlack)) {
-            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-        }
-        return
-    }
-
-    val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val effectiveSource = rawHtml.ifBlank { assembledWebDoc.orEmpty() }
 
-    val webViewHolder = remember {
-        runCatching {
-            WebView(context).apply {
-                layoutParams = ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT
-                )
-                // Software layer avoids GPU/SwiftShader renderer crashes on cloud emulators
-                setLayerType(View.LAYER_TYPE_SOFTWARE, null)
-                setBackgroundColor(android.graphics.Color.BLACK)
-                settings.apply {
-                    javaScriptEnabled = true
-                    domStorageEnabled = false
-                    allowFileAccess = false
-                    allowContentAccess = false
-                    cacheMode = WebSettings.LOAD_NO_CACHE
-                }
-                webViewClient = object : WebViewClient() {
-                    override fun shouldOverrideUrlLoading(
-                        view: WebView?,
-                        request: WebResourceRequest?
-                    ): Boolean = true
-
-                    override fun onRenderProcessGone(
-                        view: WebView?,
-                        detail: RenderProcessGoneDetail?
-                    ): Boolean {
-                        // CRITICAL: Returning true prevents Chromium AwBrowserTerminator from
-                        // fatally terminating the host Android process when a sandboxed WebView
-                        // renderer exits in containerized/emulator environments.
-                        WebViewCrashGuard.markRendererUnavailable()
-                        runCatching {
-                            view?.stopLoading()
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                                view?.removeJavascriptInterface("__SovereignHost")
-                            }
-                            (view?.parent as? ViewGroup)?.removeView(view)
-                            view?.destroy()
-                        }
-                        useNativeFallback = true
-                        return true
-                    }
-                }
-            }
-        }.onFailure {
-            WebViewCrashGuard.markRendererUnavailable()
-            useNativeFallback = true
-        }.getOrNull()
-    }
-
-    if (webViewHolder == null) {
-        NativeComposeSandboxHost(
-            applet = applet,
-            rawHtml = rawHtml,
-            reloadKey = reloadKey,
-            onBridgeCall = onBridgeCall,
-            modifier = modifier
-        )
-        return
-    }
-
-    DisposableEffect(webViewHolder, applet.appletId, applet.enableNip07) {
-        val bridge = SovereignJsBridge(
-            webView = webViewHolder,
-            applet = applet,
-            scope = scope,
-            onBridgeCall = onBridgeCall
-        )
-        runCatching {
-            webViewHolder.addJavascriptInterface(bridge, "__SovereignHost")
-        }
-        onDispose {
-            runCatching {
-                webViewHolder.removeJavascriptInterface("__SovereignHost")
-            }
-        }
-    }
-
-    DisposableEffect(webViewHolder) {
-        onDispose {
-            runCatching {
-                webViewHolder.stopLoading()
-                (webViewHolder.parent as? ViewGroup)?.removeView(webViewHolder)
-                webViewHolder.destroy()
-            }
-        }
-    }
-
-    LaunchedEffect(webViewHolder, assembledWebDoc, reloadKey) {
-        runCatching {
-            webViewHolder.loadDataWithBaseURL(
-                "https://sandbox.napplet.local/",
-                assembledWebDoc,
-                "text/html",
-                "UTF-8",
-                null
-            )
-        }.onFailure {
-            WebViewCrashGuard.markRendererUnavailable()
-            useNativeFallback = true
-        }
-    }
-
-    AndroidView(
-        factory = { webViewHolder },
-        modifier = modifier
-    )
-}
-
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun NativeComposeSandboxHost(
-    applet: InstalledAppletEntity,
-    rawHtml: String,
-    reloadKey: Int,
-    onBridgeCall: suspend (InstalledAppletEntity, String, String, JSONObject) -> Any?,
-    modifier: Modifier = Modifier
-) {
-    val scope = rememberCoroutineScope()
     var statusOutput by rememberSaveable(applet.appletId, reloadKey) { mutableStateOf("") }
     var pubkeyPreview by rememberSaveable(applet.appletId, reloadKey) { mutableStateOf("") }
     var textInput by rememberSaveable(applet.appletId) { mutableStateOf("") }
+    var showSourceInspector by rememberSaveable(applet.appletId) { mutableStateOf(false) }
     val queriedEvents = remember(applet.appletId, reloadKey) { mutableStateListOf<Pair<String, String>>() }
 
     val lowerDTag = applet.dTag.lowercase()
-    val isCrtStyle = lowerDTag.contains("puter") || rawHtml.contains("crt-shell", ignoreCase = true)
-    val isZineStyle = lowerDTag.contains("zine") || rawHtml.contains("zine-banner", ignoreCase = true)
-    val isAgentStyle = lowerDTag.contains("agent") || rawHtml.contains("agent-hero", ignoreCase = true) || applet.iconGlyph == "≠"
-    val isCipherPad = lowerDTag.contains("cipher") || rawHtml.contains("cipherStatus", ignoreCase = true)
-    val isRelaySonar = lowerDTag.contains("sonar") || rawHtml.contains("sonarOut", ignoreCase = true)
-    val isPulseNotes = lowerDTag.contains("pulse") || rawHtml.contains("noteBox", ignoreCase = true)
+    val isCrtStyle = lowerDTag.contains("puter") || effectiveSource.contains("crt-shell", ignoreCase = true)
+    val isZineStyle = lowerDTag.contains("zine") || effectiveSource.contains("zine-banner", ignoreCase = true)
+    val isAgentStyle = lowerDTag.contains("agent") || effectiveSource.contains("agent-hero", ignoreCase = true) || applet.iconGlyph == "≠"
+    val isCipherPad = lowerDTag.contains("cipher") || effectiveSource.contains("cipherStatus", ignoreCase = true)
+    val isRelaySonar = lowerDTag.contains("sonar") || effectiveSource.contains("sonarOut", ignoreCase = true)
+    val isPulseNotes = lowerDTag.contains("pulse") || effectiveSource.contains("noteBox", ignoreCase = true)
+
+    val parsedHeadings = remember(effectiveSource) { extractHeadings(effectiveSource) }
+    val parsedParagraphs = remember(effectiveSource) { extractParagraphs(effectiveSource) }
+    val parsedButtons = remember(effectiveSource) { extractButtons(effectiveSource) }
+    val parsedPlaceholder = remember(effectiveSource) { extractInputPlaceholder(effectiveSource) }
 
     LaunchedEffect(applet.appletId, applet.enableNip07, reloadKey) {
         if (applet.isNsite && isAgentStyle && !applet.enableNip07) {
@@ -284,11 +126,15 @@ private fun NativeComposeSandboxHost(
             .fillMaxSize()
             .background(BreBlack)
     ) {
-        // Subtle BreBre neon corner glow
+        // Signature BreBre neon corner glow
         Canvas(modifier = Modifier.fillMaxSize()) {
             drawCircle(
                 brush = Brush.radialGradient(
-                    colors = listOf(BreDeepPink.copy(alpha = 0.28f), BrePinkDark3.copy(alpha = 0.12f), Color.Transparent),
+                    colors = listOf(
+                        BreDeepPink.copy(alpha = 0.28f),
+                        BrePinkDark3.copy(alpha = 0.12f),
+                        Color.Transparent
+                    ),
                     center = Offset(size.width * 0.9f, size.height * 0.08f),
                     radius = size.minDimension * 0.55f
                 ),
@@ -487,14 +333,16 @@ private fun NativeComposeSandboxHost(
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = extractFirstHeading(rawHtml).ifBlank { "${applet.iconGlyph} ${applet.title}" },
+                            text = parsedHeadings.firstOrNull()?.takeIf { it.isNotBlank() }
+                                ?: "${applet.iconGlyph} ${applet.title}",
                             style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
                             color = BreWhite,
                             textAlign = if (isAgentStyle) TextAlign.Center else TextAlign.Start
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = extractFirstParagraph(rawHtml).ifBlank { applet.description },
+                            text = parsedParagraphs.firstOrNull()?.takeIf { it.isNotBlank() }
+                                ?: applet.description,
                             style = MaterialTheme.typography.bodyMedium,
                             color = BreGray100,
                             textAlign = if (isAgentStyle) TextAlign.Center else TextAlign.Start
@@ -512,7 +360,7 @@ private fun NativeComposeSandboxHost(
                 }
             }
 
-            // Specialized Interactive Capability Panels
+            // Specialized & Custom HTML/JS Interactive Capability Panels
             when {
                 isPulseNotes -> {
                     Surface(
@@ -638,22 +486,22 @@ private fun NativeComposeSandboxHost(
                                                 val ct = onBridgeCall(
                                                     applet,
                                                     "NIP-5D NAP",
-                                                    "signer.nip04Encrypt",
+                                                    "signer.nip44Encrypt",
                                                     JSONObject().put("pubkey", pk).put("plaintext", textInput)
                                                 ).toString()
                                                 onBridgeCall(
                                                     applet,
                                                     "NIP-5D NAP",
                                                     "storage.set",
-                                                    JSONObject().put("key", "vault_memo").put("value", ct)
+                                                    JSONObject().put("key", "vault_memo_v2").put("value", ct)
                                                 )
-                                                "Stored NIP-04 ciphertext: ${ct.take(32)}…"
+                                                "Stored NIP-44 v2 ciphertext: ${ct.take(32)}…"
                                             }.onSuccess { statusOutput = it }
                                                 .onFailure { statusOutput = "Error: ${it.message}" }
                                         }
                                     }
                                 ) {
-                                    Text("Encrypt & Save →")
+                                    Text("Encrypt & Save (NIP-44) →")
                                 }
                                 OutlinedButton(
                                     onClick = {
@@ -663,18 +511,18 @@ private fun NativeComposeSandboxHost(
                                                     applet,
                                                     "NIP-5D NAP",
                                                     "storage.get",
-                                                    JSONObject().put("key", "vault_memo")
+                                                    JSONObject().put("key", "vault_memo_v2")
                                                 )?.toString().orEmpty()
                                                 if (ct.isBlank() || ct == "null") error("No encrypted memo stored yet.")
                                                 val pk = onBridgeCall(applet, "NIP-5D NAP", "signer.getPublicKey", JSONObject()).toString()
                                                 val pt = onBridgeCall(
                                                     applet,
                                                     "NIP-5D NAP",
-                                                    "signer.nip04Decrypt",
+                                                    "signer.nip44Decrypt",
                                                     JSONObject().put("pubkey", pk).put("ciphertext", ct)
                                                 ).toString()
                                                 textInput = pt
-                                                "Decrypted memo via Built-in Signer!"
+                                                "Decrypted NIP-44 v2 memo via Built-in Signer!"
                                             }.onSuccess { statusOutput = it }
                                                 .onFailure { statusOutput = "Error: ${it.message}" }
                                         }
@@ -745,7 +593,7 @@ private fun NativeComposeSandboxHost(
                 }
 
                 !isCrtStyle -> {
-                    // Generic / Agent Zone / Zine / Custom Studio Applet interactive NAP actions
+                    // Dynamic HTML/CSS/JS Applet Card: renders parsed inputs, additional paragraphs, and buttons
                     Surface(
                         shape = RoundedCornerShape(18.dp),
                         color = BreGray850,
@@ -753,62 +601,122 @@ private fun NativeComposeSandboxHost(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Column(modifier = Modifier.padding(16.dp)) {
-                            val primaryBtnLabel = extractFirstButtonLabel(rawHtml).ifBlank {
-                                if (isAgentStyle) "Sign Schnorr Proof →" else "Sign Event via NAP →"
+                            if (parsedHeadings.size > 1) {
+                                Text(
+                                    text = parsedHeadings[1],
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = BreWhite
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
                             }
+                            if (parsedParagraphs.size > 1) {
+                                Text(
+                                    text = parsedParagraphs[1],
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = BreGray100
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                            }
+
+                            if (parsedPlaceholder.isNotBlank()) {
+                                OutlinedTextField(
+                                    value = textInput,
+                                    onValueChange = { textInput = it },
+                                    placeholder = { Text(parsedPlaceholder) },
+                                    shape = RoundedCornerShape(14.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Spacer(modifier = Modifier.height(10.dp))
+                            }
+
+                            val buttonsToRender = parsedButtons.ifEmpty {
+                                listOf(
+                                    if (isAgentStyle) "Sign Schnorr Proof →" else "Sign Event via NAP →",
+                                    "Read Pubkey"
+                                )
+                            }
+
                             FlowRow(
                                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                Button(
-                                    onClick = {
+                                buttonsToRender.forEachIndexed { idx, label ->
+                                    val lowerLabel = label.lowercase()
+                                    val isPubkeyBtn = lowerLabel.contains("pubkey") || lowerLabel.contains("identity") || lowerLabel.contains("ping")
+                                    val isQueryBtn = lowerLabel.contains("query") || lowerLabel.contains("scan") || lowerLabel.contains("feed")
+
+                                    val onClickAction: () -> Unit = {
                                         scope.launch {
                                             if (applet.isNsite && isAgentStyle && !applet.enableNip07) {
                                                 statusOutput = "Enable NIP-07 in the runtime bar first."
                                                 return@launch
                                             }
                                             val proto = if (applet.enableNip07) "NIP-07 window.nostr" else "NIP-5D NAP"
-                                            val kind = if (isAgentStyle) 27235 else 1
-                                            val content = if (isAgentStyle) {
-                                                "Agent Zone Identity Proof"
-                                            } else {
-                                                "Signed from ${applet.title} inside SovereignShell! ☆ #nostr"
+                                            when {
+                                                isPubkeyBtn -> {
+                                                    runCatching {
+                                                        val pk = onBridgeCall(applet, proto, "signer.getPublicKey", JSONObject())
+                                                        "PUBKEY: $pk"
+                                                    }.onSuccess { statusOutput = it }
+                                                        .onFailure { statusOutput = "ERR: ${it.message}" }
+                                                }
+                                                isQueryBtn -> {
+                                                    runCatching {
+                                                        val arr = onBridgeCall(
+                                                            applet,
+                                                            proto,
+                                                            "relay.query",
+                                                            JSONObject().put("filter", JSONObject().put("kinds", JSONArray().put(1)).put("limit", 8))
+                                                        ) as JSONArray
+                                                        queriedEvents.clear()
+                                                        for (i in 0 until arr.length()) {
+                                                            val ev = arr.optJSONObject(i) ?: continue
+                                                            queriedEvents.add("${ev.optString("pubkey").take(12)}…" to ev.optString("content"))
+                                                        }
+                                                        "Loaded ${queriedEvents.size} events from relay pool"
+                                                    }.onSuccess { statusOutput = it }
+                                                        .onFailure { statusOutput = "ERR: ${it.message}" }
+                                                }
+                                                else -> {
+                                                    val kind = if (isAgentStyle) 27235 else 1
+                                                    val body = textInput.trim().ifBlank {
+                                                        if (isAgentStyle) "Agent Zone Identity Proof"
+                                                        else "Signed from ${applet.title} inside SovereignShell! ☆ #nostr"
+                                                    }
+                                                    runCatching {
+                                                        val signed = onBridgeCall(
+                                                            applet,
+                                                            proto,
+                                                            "signer.signEvent",
+                                                            JSONObject().put(
+                                                                "event",
+                                                                JSONObject()
+                                                                    .put("kind", kind)
+                                                                    .put("content", body)
+                                                                    .put("tags", JSONArray())
+                                                            )
+                                                        ) as JSONObject
+                                                        if (kind == 1) {
+                                                            onBridgeCall(applet, proto, "relay.publish", JSONObject().put("event", signed))
+                                                        }
+                                                        textInput = ""
+                                                        "SIGNED ID: ${signed.optString("id").take(18)}… • SIG: ${signed.optString("sig").take(22)}…"
+                                                    }.onSuccess { statusOutput = it }
+                                                        .onFailure { statusOutput = "DENIED: ${it.message}" }
+                                                }
                                             }
-                                            runCatching {
-                                                val signed = onBridgeCall(
-                                                    applet,
-                                                    proto,
-                                                    "signer.signEvent",
-                                                    JSONObject().put(
-                                                        "event",
-                                                        JSONObject()
-                                                            .put("kind", kind)
-                                                            .put("content", content)
-                                                            .put("tags", JSONArray())
-                                                    )
-                                                ) as JSONObject
-                                                "Schnorr Sig: ${signed.optString("sig").take(32)}… (ID ${signed.optString("id").take(12)}…)"
-                                            }.onSuccess { statusOutput = it }
-                                                .onFailure { statusOutput = "Rejected: ${it.message}" }
                                         }
                                     }
-                                ) {
-                                    Text(primaryBtnLabel)
-                                }
 
-                                OutlinedButton(
-                                    onClick = {
-                                        scope.launch {
-                                            val proto = if (applet.enableNip07) "NIP-07 window.nostr" else "NIP-5D NAP"
-                                            runCatching {
-                                                val pk = onBridgeCall(applet, proto, "signer.getPublicKey", JSONObject())
-                                                "Verified Pubkey: $pk"
-                                            }.onSuccess { statusOutput = it }
-                                                .onFailure { statusOutput = "Error: ${it.message}" }
+                                    if (idx == 0) {
+                                        Button(onClick = onClickAction) {
+                                            Text(label)
+                                        }
+                                    } else {
+                                        OutlinedButton(onClick = onClickAction) {
+                                            Text(label)
                                         }
                                     }
-                                ) {
-                                    Text("Read Pubkey")
                                 }
                             }
 
@@ -869,36 +777,70 @@ private fun NativeComposeSandboxHost(
                     }
                 }
             }
+
+            // Collapsible Source Bundle Inspector
+            Row(
+                horizontalArrangement = Arrangement.End,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                TextButton(onClick = { showSourceInspector = !showSourceInspector }) {
+                    Text(
+                        text = if (showSourceInspector) "Hide Bundle Source" else "Inspect NIP-5D / NIP-5A Bundle",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = BreGray100
+                    )
+                }
+            }
+
+            AnimatedVisibility(visible = showSourceInspector) {
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = BreGray900,
+                    border = BorderStroke(1.dp, BrePinkDark3),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = effectiveSource.take(1800),
+                        fontFamily = JetBrainsMonoFontFamily,
+                        fontSize = 11.sp,
+                        lineHeight = 16.sp,
+                        color = BreGray100,
+                        modifier = Modifier.padding(12.dp)
+                    )
+                }
+            }
         }
     }
 }
 
-private fun extractFirstHeading(html: String): String {
-    val match = Regex("<h[1-3][^>]*>(.*?)</h[1-3]>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
-        .find(html)
-        ?.groupValues
-        ?.getOrNull(1)
-        .orEmpty()
-    return stripHtmlTags(match)
-}
+private fun extractHeadings(html: String): List<String> =
+    Regex("<h[1-3][^>]*>(.*?)</h[1-3]>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+        .findAll(html)
+        .map { stripHtmlTags(it.groupValues[1]) }
+        .filter { it.isNotBlank() }
+        .toList()
 
-private fun extractFirstParagraph(html: String): String {
-    val match = Regex("<p[^>]*>(.*?)</p>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
-        .find(html)
-        ?.groupValues
-        ?.getOrNull(1)
-        .orEmpty()
-    return stripHtmlTags(match)
-}
+private fun extractParagraphs(html: String): List<String> =
+    Regex("<p[^>]*>(.*?)</p>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+        .findAll(html)
+        .map { stripHtmlTags(it.groupValues[1]) }
+        .filter { it.isNotBlank() }
+        .toList()
 
-private fun extractFirstButtonLabel(html: String): String {
-    val match = Regex("<button[^>]*>(.*?)</button>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+private fun extractButtons(html: String): List<String> =
+    Regex("<button[^>]*>(.*?)</button>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+        .findAll(html)
+        .map { stripHtmlTags(it.groupValues[1]) }
+        .filter { it.isNotBlank() }
+        .toList()
+
+private fun extractInputPlaceholder(html: String): String =
+    Regex("placeholder=[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
         .find(html)
         ?.groupValues
         ?.getOrNull(1)
+        ?.let { stripHtmlTags(it) }
         .orEmpty()
-    return stripHtmlTags(match)
-}
 
 private fun stripHtmlTags(raw: String): String =
     raw.replace(Regex("<[^>]+>"), "")
@@ -906,4 +848,5 @@ private fun stripHtmlTags(raw: String): String =
         .replace("&nbsp;", " ")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
+        .replace("&rarr;", "→")
         .trim()

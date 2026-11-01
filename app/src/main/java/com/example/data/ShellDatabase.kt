@@ -71,6 +71,9 @@ interface ShellDao {
     @Query("SELECT * FROM installed_applets ORDER BY isInstalled DESC, updatedAt DESC")
     fun observeAllCatalogApplets(): Flow<List<InstalledAppletEntity>>
 
+    @Query("SELECT * FROM installed_applets")
+    suspend fun getAllCatalogAppletsList(): List<InstalledAppletEntity>
+
     @Query("SELECT * FROM installed_applets WHERE appletId = :appletId LIMIT 1")
     suspend fun getAppletById(appletId: String): InstalledAppletEntity?
 
@@ -82,6 +85,9 @@ interface ShellDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertApplets(applets: List<InstalledAppletEntity>)
+
+    @Query("DELETE FROM installed_applets WHERE appletId IN (:appletIds) AND isInstalled = 0")
+    suspend fun deleteUninstalledApplets(appletIds: List<String>)
 
     @Query("UPDATE installed_applets SET isInstalled = :installed, updatedAt = :now WHERE appletId = :appletId")
     suspend fun setAppletInstalled(appletId: String, installed: Boolean, now: Long = System.currentTimeMillis())

@@ -1,11 +1,8 @@
 package com.example.ui
 
-import android.webkit.JavascriptInterface
-import android.webkit.WebView
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -13,14 +10,12 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Refresh
@@ -28,7 +23,6 @@ import androidx.compose.material.icons.filled.Security
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -51,9 +45,6 @@ import com.example.ui.theme.CyberMint
 import com.example.ui.theme.ObsidianBase
 import com.example.ui.theme.ObsidianBorder
 import com.example.ui.theme.ObsidianElevated
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import org.json.JSONObject
 
 @Composable
@@ -161,10 +152,6 @@ fun AppletRuntimeScreen(
             }
         }
 
-        if (htmlDoc == null && !WebViewCrashGuard.isRendererUnavailable()) {
-            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-        }
-
         Box(modifier = Modifier.weight(1f)) {
             SandboxedAppletSurface(
                 applet = applet,
@@ -180,98 +167,22 @@ fun AppletRuntimeScreen(
     }
 }
 
-internal class SovereignJsBridge(
-    private val webView: WebView,
-    private val applet: InstalledAppletEntity,
-    private val scope: CoroutineScope,
-    private val onBridgeCall: suspend (InstalledAppletEntity, String, String, JSONObject) -> Any?
-) {
-    @JavascriptInterface
-    fun postEnvelope(rawJson: String, protocol: String) {
-        scope.launch(Dispatchers.Main) {
-            val req = runCatching { JSONObject(rawJson) }.getOrNull() ?: return@launch
-            val id = req.optString("id")
-            val type = req.optString("type")
-            if (id.isBlank() || type.isBlank()) return@launch
-
-            val replyObj = JSONObject().apply {
-                put("id", id)
-                put("reply", true)
-            }
-            runCatching {
-                onBridgeCall(applet, protocol, type, req)
-            }.onSuccess { res ->
-                replyObj.put("result", res ?: JSONObject.NULL)
-            }.onFailure { err ->
-                replyObj.put("error", err.message ?: "Signer denied request")
-            }
-
-            val escapedJson = JSONObject.quote(replyObj.toString())
-            webView.evaluateJavascript(
-                "window.__sovereignDeliverReply($escapedJson);",
-                null
-            )
-        }
-    }
-}
-
 internal fun injectRuntimeBootstrap(html: String, enableNip07: Boolean): String {
     val nip07Script = if (enableNip07) {
         """
         window.nostr = {
-          _call(type, extra) {
-            return new Promise((resolve, reject) => {
-              const id = 'nip07_' + Math.random().toString(36).slice(2, 10);
-              window.__sovereignCallbacks[id] = { resolve, reject };
-              window.__SovereignHost.postEnvelope(JSON.stringify({ id, type, ...extra }), 'NIP-07 window.nostr');
-            });
-          },
-          getPublicKey() { return this._call('signer.getPublicKey', {}); },
-          getRelays() { return this._call('signer.getRelays', {}); },
-          signEvent(event) { return this._call('signer.signEvent', { event }); },
-          nip04: {
-            encrypt(pubkey, plaintext) { return window.nostr._call('signer.nip04Encrypt', { pubkey, plaintext }); },
-            decrypt(pubkey, ciphertext) { return window.nostr._call('signer.nip04Decrypt', { pubkey, ciphertext }); }
-          },
-          nip44: {
-            encrypt(pubkey, plaintext) { return window.nostr._call('signer.nip44Encrypt', { pubkey, plaintext }); },
-            decrypt(pubkey, ciphertext) { return window.nostr._call('signer.nip44Decrypt', { pubkey, ciphertext }); }
-          }
+          getPublicKey() { return Promise.resolve(); },
+          getRelays() { return Promise.resolve({}); },
+          signEvent(event) { return Promise.resolve(event); },
+          nip04: { encrypt(pk, pt) {}, decrypt(pk, ct) {} },
+          nip44: { encrypt(pk, pt) {}, decrypt(pk, ct) {} }
         };
         """.trimIndent()
     } else {
         "try { delete window.nostr; } catch(e) {}"
     }
 
-    val bootstrap = """
-    <script>
-      (function() {
-        window.__sovereignCallbacks = {};
-        window.__sovereignDeliverReply = function(rawStr) {
-          try {
-            const msg = JSON.parse(rawStr);
-            if (window.__sovereignCallbacks[msg.id]) {
-              const cb = window.__sovereignCallbacks[msg.id];
-              delete window.__sovereignCallbacks[msg.id];
-              if (msg.error) cb.reject(msg.error); else cb.resolve(msg.result);
-              return;
-            }
-            window.postMessage(msg, '*');
-          } catch (e) {}
-        };
-        window.addEventListener('message', function(ev) {
-          let d = ev.data;
-          if (typeof d === 'string') { try { d = JSON.parse(d); } catch(e) { return; } }
-          if (!d || d.reply === true || !d.id || !d.type) return;
-          if (window.__SovereignHost) {
-            window.__SovereignHost.postEnvelope(JSON.stringify(d), 'NIP-5D NAP');
-          }
-        });
-        $nip07Script
-      })();
-    </script>
-    """.trimIndent()
-
+    val bootstrap = "<script>(function(){ $nip07Script })();</script>"
     return if (html.contains("<head>", ignoreCase = true)) {
         html.replaceFirst(Regex("<head>", RegexOption.IGNORE_CASE), "<head>$bootstrap")
     } else {

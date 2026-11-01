@@ -140,11 +140,25 @@ class ShellViewModel(
     val launcherPrefs: StateFlow<LauncherPrefs> = repository.prefsRepo.prefsFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), LauncherPrefs())
 
+    private val _spamShieldEnabled = MutableStateFlow(true)
+    val spamShieldEnabled: StateFlow<Boolean> = _spamShieldEnabled.asStateFlow()
+
     val installedApplets: StateFlow<List<InstalledAppletEntity>> = repository.installedAppletsFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val catalogApplets: StateFlow<List<InstalledAppletEntity>> = repository.catalogAppletsFlow
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val catalogApplets: StateFlow<List<InstalledAppletEntity>> = combine(
+        repository.rawCatalogAppletsFlow,
+        repository.filteredCatalogFlow,
+        _spamShieldEnabled
+    ) { raw, filtered, shieldOn ->
+        if (shieldOn) filtered.cleanItems else raw
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val blockedSpamCount: StateFlow<Int> = combine(
+        repository.filteredCatalogFlow
+    ) { arr ->
+        arr.first().blockedSpamCount
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 
     val managedRelays: StateFlow<List<ManagedRelayItem>> = repository.managedRelaysFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -428,6 +442,26 @@ class ShellViewModel(
     }
 
     // --- Discovery, Pinning & Studio Publishing ---
+
+    fun toggleSpamShield() {
+        val next = !_spamShieldEnabled.value
+        _spamShieldEnabled.value = next
+        showBanner(
+            if (next) "Spam Shield enabled — bot clones hidden"
+            else "Spam Shield paused — showing raw relay feed"
+        )
+    }
+
+    fun refreshDiscoveryCatalog(silent: Boolean = false) {
+        viewModelScope.launch {
+            runCatching { repository.refreshCatalogFromRelays() }
+                .onSuccess {
+                    if (!silent) {
+                        showBanner("Syncing NIP-5D Napplets & NIP-5A Nsites from relays…")
+                    }
+                }
+        }
+    }
 
     fun setAppletInstalled(applet: InstalledAppletEntity, installed: Boolean) {
         viewModelScope.launch {

@@ -6,6 +6,7 @@ import org.json.JSONObject
 object NostrKinds {
     const val METADATA = 0
     const val TEXT_NOTE = 1
+    const val NAPPLET_SNAPSHOT = 5129
     const val RELAY_LIST = 10002
     const val NSITE_ROOT = 15128
     const val NAPPLET_ROOT = 15129

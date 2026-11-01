@@ -104,25 +104,38 @@ class BlossomClient(
         }
     }
 
-    suspend fun fetchBlobText(servers: List<String>, sha256: String): String? =
+    suspend fun fetchBlobText(servers: List<String>, sha256: String, directUrl: String = ""): String? =
         withContext(Dispatchers.IO) {
-            val allServers = (servers + DEFAULT_BLOSSOM_SERVERS)
-                .map { it.trim().trimEnd('/') }
-                .filter { it.isNotBlank() }
-                .distinct()
-            for (srv in allServers) {
-                val candidate = runCatching {
-                    val req = Request.Builder().url("$srv/$sha256").get().build()
+            if (directUrl.startsWith("https://", ignoreCase = true) || directUrl.startsWith("http://", ignoreCase = true)) {
+                val direct = runCatching {
+                    val req = Request.Builder().url(directUrl).get().build()
                     okHttpClient.newCall(req).execute().use { resp ->
-                        if (resp.isSuccessful) {
-                            val bytes = resp.body?.bytes() ?: return@use null
-                            if (NostrCrypto.sha256Hex(bytes).equals(sha256, ignoreCase = true)) {
-                                String(bytes, Charsets.UTF_8)
-                            } else null
-                        } else null
+                        if (resp.isSuccessful) resp.body?.string() else null
                     }
                 }.getOrNull()
-                if (candidate != null) return@withContext candidate
+                if (!direct.isNullOrBlank()) return@withContext direct
+            }
+            if (sha256.isBlank()) return@withContext null
+
+            val allServers = (servers + DEFAULT_BLOSSOM_SERVERS)
+                .map { it.trim().trimEnd('/') }
+                .filter { it.startsWith("https://") || it.startsWith("http://") }
+                .distinct()
+            for (srv in allServers) {
+                for (suffix in listOf("", ".html")) {
+                    val candidate = runCatching {
+                        val req = Request.Builder().url("$srv/$sha256$suffix").get().build()
+                        okHttpClient.newCall(req).execute().use { resp ->
+                            if (resp.isSuccessful) {
+                                val bytes = resp.body?.bytes() ?: return@use null
+                                if (NostrCrypto.sha256Hex(bytes).equals(sha256, ignoreCase = true)) {
+                                    String(bytes, Charsets.UTF_8)
+                                } else null
+                            } else null
+                        }
+                    }.getOrNull()
+                    if (candidate != null) return@withContext candidate
+                }
             }
             null
         }
@@ -130,7 +143,9 @@ class BlossomClient(
     companion object {
         val DEFAULT_BLOSSOM_SERVERS = listOf(
             "https://blossom.primal.net",
-            "https://nostr.download"
+            "https://nostr.download",
+            "https://cdn.satellite.earth",
+            "https://blossom.band"
         )
     }
 }

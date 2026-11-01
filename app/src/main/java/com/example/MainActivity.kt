@@ -82,6 +82,8 @@ fun SovereignShellRoot(vm: ShellViewModel) {
     val launcherPrefs by vm.launcherPrefs.collectAsStateWithLifecycle()
     val installedApplets by vm.installedApplets.collectAsStateWithLifecycle()
     val catalogApplets by vm.catalogApplets.collectAsStateWithLifecycle()
+    val spamShieldEnabled by vm.spamShieldEnabled.collectAsStateWithLifecycle()
+    val blockedSpamCount by vm.blockedSpamCount.collectAsStateWithLifecycle()
     val relays by vm.managedRelays.collectAsStateWithLifecycle()
     val connectedRelayCount by vm.connectedRelayCount.collectAsStateWithLifecycle()
     val notes by vm.notes.collectAsStateWithLifecycle()
@@ -162,6 +164,11 @@ fun SovereignShellRoot(vm: ShellViewModel) {
                             DiscoveryFeedScreen(
                                 initialTabIsNsites = dest.initialTabIsNsites,
                                 catalogApplets = catalogApplets,
+                                spamShieldEnabled = spamShieldEnabled,
+                                blockedSpamCount = blockedSpamCount,
+                                connectedRelays = connectedRelayCount,
+                                onToggleSpamShield = { vm.toggleSpamShield() },
+                                onRefreshCatalog = { silent -> vm.refreshDiscoveryCatalog(silent) },
                                 onInstallToggle = { app, install -> vm.setAppletInstalled(app, install) },
                                 onOpenApplet = { app ->
                                     vm.navigateTo(ShellDestination.RunningApplet(app.appletId))
