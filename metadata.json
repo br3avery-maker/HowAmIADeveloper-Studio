@@ -1,0 +1,6 @@
+{
+  "name": "SovereignShell",
+  "description": "Self-publishing Nostr napplet & nsite launcher shell with built-in signer, user profiles, NIP-01 notes, and relay management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
