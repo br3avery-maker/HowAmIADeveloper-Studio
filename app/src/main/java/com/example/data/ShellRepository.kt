@@ -19,8 +19,18 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.net.URLDecoder
+import java.util.concurrent.ConcurrentHashMap
+
+data class ResolvedWebAsset(
+    val bytes: ByteArray,
+    val mimeType: String,
+    val encoding: String?,
+    val sha256: String = ""
+)
 
 data class ManagedRelayItem(
     val url: String,
@@ -46,11 +56,15 @@ class ShellRepository(
     private val dao: ShellDao = ShellDatabase.getInstance(context).shellDao(),
     private val keyVault: KeyVaultManager = KeyVaultManager(context),
     val relayPool: RelayPoolClient = RelayPoolClient(),
-    private val blossomClient: BlossomClient = BlossomClient(),
+    private val blossomClient: BlossomClient = BlossomClient(
+        cacheDir = File(context.applicationContext.cacheDir, "blossom_blobs")
+    ),
     val prefsRepo: LauncherPreferencesRepository = LauncherPreferencesRepository(context)
 ) {
     private val appContext = context.applicationContext
     private val repoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val authorBlossomCache = ConcurrentHashMap<String, List<String>>()
+    private val legacyNsitePathCache = ConcurrentHashMap<String, Map<String, String>>()
 
     val accountsFlow: Flow<List<VaultAccountEntity>> = dao.observeAccounts()
     val activeAccountFlow: Flow<VaultAccountEntity?> = dao.observeActiveAccount()
@@ -65,6 +79,18 @@ class ShellRepository(
     val catalogAppletsFlow: Flow<List<InstalledAppletEntity>> = combine(
         filteredCatalogFlow
     ) { arr -> arr.first().cleanItems }
+    val curatedBookmarksFlow: Flow<List<CuratedBookmarkEntity>> = dao.observeCuratedBookmarks()
+    val stackedGalleryFlow: Flow<List<StackedAppletGroup>> = combine(
+        filteredCatalogFlow,
+        dao.observeCuratedBookmarks(),
+        dao.observeActiveAccount()
+    ) { filtered, bookmarks, active ->
+        CatalogStacker.buildStackedGroups(
+            items = filtered.cleanItems,
+            bookmarks = bookmarks,
+            localPubkeyHex = active?.pubkeyHex.orEmpty()
+        )
+    }
     val notesFlow: Flow<List<NoteEntity>> = dao.observeNotes()
     val auditLogFlow: Flow<List<SignerAuditEntity>> = dao.observeAuditLog()
     val signerPoliciesFlow: Flow<List<SignerPolicyEntity>> = dao.observeSignerPolicies()
@@ -125,13 +151,16 @@ class ShellRepository(
         }
         relayPool.syncRelays(relayUrls)
 
-        // 3. Seed starter Napplets & Nsites catalog if empty, and purge any cached spam bot entries
-        if (dao.countApplets() == 0 && active != null) {
-            val starters = StarterCatalog.defaultCatalog(active.pubkeyHex, active.npub)
-            dao.upsertApplets(starters)
-        } else {
-            purgeCachedSpamApplets(active?.pubkeyHex.orEmpty())
+        // 3. Seed starter Napplets & Nsites catalog (inserting any missing showcase starters without overwriting user pins)
+        if (active != null) {
+            val existingIds = dao.getAllCatalogAppletsList().mapTo(HashSet()) { it.appletId }
+            val missingStarters = StarterCatalog.defaultCatalog(active.pubkeyHex, active.npub)
+                .filter { it.appletId !in existingIds }
+            if (missingStarters.isNotEmpty()) {
+                dao.upsertApplets(missingStarters)
+            }
         }
+        purgeCachedSpamApplets(active?.pubkeyHex.orEmpty())
 
         active?.let { relayPool.requestAuthorMetadata(it.pubkeyHex) }
     }
@@ -158,9 +187,57 @@ class ShellRepository(
             when (event.kind) {
                 NostrKinds.METADATA -> handleIncomingMetadata(event)
                 NostrKinds.TEXT_NOTE -> handleIncomingTextNote(event)
+                NostrKinds.NIP51_BOOKMARK_SET, NostrKinds.NIP51_CATEGORIZED_LIST,
+                NostrKinds.NIP51_BOOKMARKS -> handleIncomingNip51List(event)
                 NostrKinds.NAPPLET_NAMED, NostrKinds.NAPPLET_ROOT, NostrKinds.NAPPLET_SNAPSHOT,
                 NostrKinds.NSITE_NAMED, NostrKinds.NSITE_ROOT -> handleIncomingManifest(event)
             }
+        }
+    }
+
+    private suspend fun handleIncomingNip51List(event: NostrEvent) {
+        val validKinds = setOf(
+            NostrKinds.NAPPLET_NAMED,
+            NostrKinds.NAPPLET_ROOT,
+            NostrKinds.NSITE_NAMED,
+            NostrKinds.NSITE_ROOT
+        )
+        val listSlug = event.tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.get(1)?.ifBlank { null }
+            ?: "bookmarks"
+        val listTitle = event.tags.firstOrNull { it.size >= 2 && (it[0] == "title" || it[0] == "name") }
+            ?.get(1)?.ifBlank { null } ?: listSlug
+        val localAcc = dao.getAccountByPubkey(event.pubkey)
+        val curatorNpub = localAcc?.npub
+            ?: runCatching { NostrCrypto.encodeNpub(event.pubkey) }.getOrDefault(event.pubkey.take(16))
+
+        val coordinates = event.tags
+            .filter { it.size >= 2 && it[0] == "a" }
+            .map { it[1].trim() }
+            .filter { coord ->
+                val kindPrefix = coord.substringBefore(':').toIntOrNull()
+                kindPrefix in validKinds
+            }
+            .distinct()
+
+        if (coordinates.isEmpty()) return
+
+        val entities = coordinates.map { coord ->
+            CuratedBookmarkEntity(
+                coordinate = coord,
+                curatorPubkey = event.pubkey,
+                curatorNpub = curatorNpub,
+                listSlug = listSlug,
+                listTitle = listTitle,
+                isLocalCurator = localAcc != null,
+                createdAt = event.createdAt * 1000L
+            )
+        }
+        dao.upsertCuratedBookmarks(entities)
+
+        // Fetch any curated manifests not yet stored locally
+        val missingCoords = coordinates.filter { dao.getAppletById(it) == null }
+        if (missingCoords.isNotEmpty()) {
+            relayPool.requestManifestsByCoordinates(missingCoords)
         }
     }
 
@@ -645,27 +722,160 @@ class ShellRepository(
     suspend fun setAppletNip07(appletId: String, enabled: Boolean) =
         dao.setAppletNip07(appletId, enabled)
 
-    suspend fun resolveAppletDocument(applet: InstalledAppletEntity): String = withContext(Dispatchers.IO) {
-        val directUrl = runCatching {
-            if (applet.manifestPathsJson.isNotBlank()) {
-                JSONObject(applet.manifestPathsJson).optString("__direct_url")
-            } else ""
-        }.getOrDefault("")
-
-        val htmlBody = if (applet.inlineHtml.isNotBlank()) {
-            applet.inlineHtml
-        } else if (applet.indexSha256.isNotBlank() || directUrl.isNotBlank()) {
-            blossomClient.fetchBlobText(
-                servers = listOf(applet.blossomServer),
-                sha256 = applet.indexSha256,
-                directUrl = directUrl
-            ) ?: "<div class='card'><h2>${applet.title}</h2><p>${applet.description}</p><p class='mono'>Blossom SHA-256: ${applet.indexSha256.ifBlank { directUrl }}</p></div>"
-        } else {
-            "<div class='card'><h2>${applet.title}</h2><p>${applet.description}</p></div>"
+    suspend fun toggleLocalNip51Bookmark(applet: InstalledAppletEntity): Boolean =
+        withContext(Dispatchers.IO) {
+            val active = dao.getActiveAccount() ?: error("No active Nostr account")
+            val coordinate = CatalogStacker.coordinateFor(applet)
+            val existing = dao.getBookmark(coordinate, active.pubkeyHex)
+            if (existing != null) {
+                dao.deleteCuratedBookmark(coordinate, active.pubkeyHex)
+                false
+            } else {
+                dao.upsertCuratedBookmark(
+                    CuratedBookmarkEntity(
+                        coordinate = coordinate,
+                        curatorPubkey = active.pubkeyHex,
+                        curatorNpub = active.npub,
+                        listSlug = "sovereign-gallery",
+                        listTitle = "${active.displayName.ifBlank { "Sovereign" }} Curated Apps",
+                        isLocalCurator = true
+                    )
+                )
+                true
+            }
         }
 
-        if (htmlBody.contains("<html", ignoreCase = true)) {
-            htmlBody
+    suspend fun publishNip51CuratedList(): RelayPublishSummary = withContext(Dispatchers.IO) {
+        val (active, privHex) = getActivePrivateKeyHex() ?: error("No active signer key")
+        val bookmarks = dao.getBookmarksByCurator(active.pubkeyHex)
+        require(bookmarks.isNotEmpty()) { "Star at least one app or nsite to publish a NIP-51 list" }
+
+        val tags = buildList {
+            add(listOf("d", "sovereign-gallery"))
+            add(listOf("title", "${active.displayName.ifBlank { "Sovereign" }} Curated Gallery"))
+            add(listOf("description", "Curated NIP-5D Napplets & NIP-5A Nsites from SovereignShell"))
+            bookmarks.forEach { bm -> add(listOf("a", bm.coordinate)) }
+            add(listOf("client", "SovereignShell"))
+        }
+        val signedList = NostrEvent.createAndSign(
+            privKeyHex = privHex,
+            kind = NostrKinds.NIP51_BOOKMARK_SET,
+            content = "",
+            tags = tags
+        )
+        recordAudit(
+            account = active,
+            appletId = "shell:gallery-nip51",
+            appletTitle = "Curated Gallery (NIP-51)",
+            protocolLabel = "Built-in Signer",
+            method = "signEvent",
+            eventKind = NostrKinds.NIP51_BOOKMARK_SET,
+            approved = true,
+            summary = "Published NIP-51 Kind 30003 curated app list (${bookmarks.size} items)"
+        )
+        relayPool.publishEvent(signedList)
+    }
+
+    suspend fun fetchAuthorBlossomServers(authorPubkey: String): List<String> = withContext(Dispatchers.IO) {
+        val pk = authorPubkey.trim().lowercase()
+        if (pk.length != 64) return@withContext emptyList()
+        authorBlossomCache[pk]?.let { return@withContext it }
+
+        val filter = JSONObject().apply {
+            put("kinds", JSONArray().put(NostrKinds.USER_BLOSSOM_SERVERS))
+            put("authors", JSONArray().put(pk))
+            put("limit", 1)
+        }
+        val events = runCatching { relayPool.queryEventsOnce(filter, timeoutMs = 2000L) }.getOrDefault(emptyList())
+        val discovered = events.firstOrNull()
+            ?.tags
+            ?.filter {
+                it.size >= 2 &&
+                    (it[0] == "server" || it[0] == "r") &&
+                    (it[1].startsWith("https://", ignoreCase = true) || it[1].startsWith("http://", ignoreCase = true))
+            }
+            ?.map { it[1].trim().trimEnd('/') }
+            ?.distinct()
+            .orEmpty()
+
+        authorBlossomCache[pk] = discovered
+        discovered
+    }
+
+    private suspend fun fetchLegacyNsitePathMap(authorPubkey: String): Map<String, String> = withContext(Dispatchers.IO) {
+        val pk = authorPubkey.trim().lowercase()
+        if (pk.length != 64) return@withContext emptyMap()
+        legacyNsitePathCache[pk]?.let { return@withContext it }
+
+        val filter = JSONObject().apply {
+            put("kinds", JSONArray().put(NostrKinds.NSITE_LEGACY_FILE))
+            put("authors", JSONArray().put(pk))
+            put("limit", 120)
+        }
+        val events = runCatching { relayPool.queryEventsOnce(filter, timeoutMs = 2400L) }.getOrDefault(emptyList())
+        val map = LinkedHashMap<String, String>()
+        events.sortedByDescending { it.createdAt }.forEach { ev ->
+            val path = ev.tags.firstOrNull { it.size >= 2 && (it[0] == "d" || it[0] == "path") }?.get(1)?.trim().orEmpty()
+            val sha = ev.tags.firstOrNull { it.size >= 2 && (it[0] == "x" || it[0] == "sha256") }?.get(1)?.trim().orEmpty()
+            if (path.isNotBlank() && sha.length == 64 && path !in map) {
+                map[path] = sha
+            }
+        }
+        legacyNsitePathCache[pk] = map
+        map
+    }
+
+    private suspend fun candidateBlossomServersFor(applet: InstalledAppletEntity, manifestObj: JSONObject?): List<String> {
+        val fromManifestArr = buildList {
+            if (applet.blossomServer.isNotBlank()) add(applet.blossomServer)
+            val arr = manifestObj?.optJSONArray("__servers")
+            if (arr != null) {
+                for (i in 0 until arr.length()) {
+                    val s = arr.optString(i).trim()
+                    if (s.isNotBlank()) add(s)
+                }
+            }
+        }
+        val authorServers = if (applet.inlineHtml.isBlank() && applet.authorPubkey.length == 64) {
+            fetchAuthorBlossomServers(applet.authorPubkey)
+        } else {
+            emptyList()
+        }
+        return (fromManifestArr + authorServers).distinct()
+    }
+
+    suspend fun resolveAppletDocument(applet: InstalledAppletEntity): String = withContext(Dispatchers.IO) {
+        val manifestObj = runCatching {
+            if (applet.manifestPathsJson.isNotBlank()) JSONObject(applet.manifestPathsJson) else null
+        }.getOrNull()
+        val directUrl = manifestObj?.optString("__direct_url").orEmpty()
+        val servers = candidateBlossomServersFor(applet, manifestObj)
+
+        var resolvedSha = applet.indexSha256
+        if (resolvedSha.isBlank() && applet.inlineHtml.isBlank() && applet.isNsite && applet.authorPubkey.length == 64) {
+            val legacyMap = fetchLegacyNsitePathMap(applet.authorPubkey)
+            resolvedSha = legacyMap["/index.html"] ?: legacyMap["index.html"] ?: ""
+        }
+
+        val fetchedHtml = when {
+            applet.inlineHtml.isNotBlank() -> applet.inlineHtml
+            resolvedSha.isNotBlank() || directUrl.isNotBlank() -> {
+                blossomClient.fetchBlobText(
+                    servers = servers,
+                    sha256 = resolvedSha,
+                    extensionHint = "html",
+                    directUrl = directUrl
+                )
+            }
+            else -> null
+        }
+
+        if (fetchedHtml == null) {
+            return@withContext buildUnreachableBundleDiagnosticHtml(applet, resolvedSha, directUrl, servers)
+        }
+
+        if (fetchedHtml.contains("<html", ignoreCase = true) || fetchedHtml.contains("<!doctype", ignoreCase = true)) {
+            fetchedHtml
         } else {
             """
 <!DOCTYPE html>
@@ -676,12 +886,170 @@ class ShellRepository(
   <style>${applet.inlineCss.ifBlank { StarterCatalog.COMMON_APPLET_CSS }}</style>
 </head>
 <body>
-  $htmlBody
+  $fetchedHtml
   <script>${applet.inlineJs}</script>
 </body>
 </html>
             """.trimIndent()
         }
+    }
+
+    suspend fun resolveAppletAsset(
+        applet: InstalledAppletEntity,
+        rawPath: String,
+        isMainFrame: Boolean,
+        transformRootHtml: (String) -> String = { it }
+    ): ResolvedWebAsset? = withContext(Dispatchers.IO) {
+        val stripped = rawPath.substringBefore('?').substringBefore('#').trim()
+        val decoded = runCatching { URLDecoder.decode(stripped, "UTF-8") }.getOrDefault(stripped)
+        val cleanPath = "/" + decoded.trimStart('/')
+
+        // 1. Root HTML entry point
+        if (cleanPath == "/" || cleanPath.equals("/index.html", ignoreCase = true)) {
+            val html = transformRootHtml(resolveAppletDocument(applet))
+            return@withContext ResolvedWebAsset(
+                bytes = html.toByteArray(Charsets.UTF_8),
+                mimeType = "text/html",
+                encoding = "utf-8",
+                sha256 = applet.indexSha256
+            )
+        }
+
+        // 2. Inline Studio / Starter CSS & JS bundles
+        if (cleanPath.equals("/style.css", ignoreCase = true) && applet.inlineCss.isNotBlank()) {
+            return@withContext ResolvedWebAsset(
+                bytes = applet.inlineCss.toByteArray(Charsets.UTF_8),
+                mimeType = "text/css",
+                encoding = "utf-8"
+            )
+        }
+        if (cleanPath.equals("/app.js", ignoreCase = true) && applet.inlineJs.isNotBlank()) {
+            return@withContext ResolvedWebAsset(
+                bytes = applet.inlineJs.toByteArray(Charsets.UTF_8),
+                mimeType = "text/javascript",
+                encoding = "utf-8"
+            )
+        }
+
+        val manifestObj = runCatching {
+            if (applet.manifestPathsJson.isNotBlank()) JSONObject(applet.manifestPathsJson) else null
+        }.getOrNull()
+
+        // 3. Look up subresource SHA-256 in NIP-5A / NIP-5D manifest path map
+        var assetSha = lookupPathShaInJson(manifestObj, cleanPath)
+
+        // 4. Fallback to NIP-5A v1 Kind 34128 per-path events if not in manifestPathsJson
+        if (assetSha.isBlank() && applet.authorPubkey.length == 64) {
+            val legacyMap = fetchLegacyNsitePathMap(applet.authorPubkey)
+            val noSlash = cleanPath.removePrefix("/")
+            assetSha = legacyMap[cleanPath]
+                ?: legacyMap[noSlash]
+                ?: legacyMap["$cleanPath/index.html"]
+                ?: ""
+        }
+
+        val extHint = cleanPath.substringAfterLast('/', "").substringAfterLast('.', "")
+        if (assetSha.isNotBlank()) {
+            val servers = candidateBlossomServersFor(applet, manifestObj)
+            val bytes = blossomClient.fetchBlobBytes(
+                servers = servers,
+                sha256 = assetSha,
+                extensionHint = extHint
+            )
+            if (bytes != null) {
+                val (mime, enc) = guessMimeType(cleanPath, bytes)
+                val finalBytes = if (mime == "text/html" && isMainFrame) {
+                    transformRootHtml(String(bytes, Charsets.UTF_8)).toByteArray(Charsets.UTF_8)
+                } else {
+                    bytes
+                }
+                return@withContext ResolvedWebAsset(
+                    bytes = finalBytes,
+                    mimeType = mime,
+                    encoding = enc,
+                    sha256 = assetSha
+                )
+            }
+        }
+
+        // 5. Direct gateway / URL relative asset fallback if manifest specified ["url", ...]
+        val directUrl = manifestObj?.optString("__direct_url").orEmpty()
+        if (directUrl.startsWith("https://", ignoreCase = true) || directUrl.startsWith("http://", ignoreCase = true)) {
+            val resolvedRelative = runCatching {
+                java.net.URI(directUrl).resolve(cleanPath).toString()
+            }.getOrNull()
+            if (!resolvedRelative.isNullOrBlank()) {
+                val bytes = blossomClient.fetchRawUrlBytes(resolvedRelative)
+                if (bytes != null) {
+                    val (mime, enc) = guessMimeType(cleanPath, bytes)
+                    return@withContext ResolvedWebAsset(bytes = bytes, mimeType = mime, encoding = enc)
+                }
+            }
+        }
+
+        // 6. Single-Page Application (SPA) route fallback for main-frame navigations without file extensions
+        val lastSegment = cleanPath.substringAfterLast('/')
+        if (isMainFrame && !lastSegment.contains('.')) {
+            val html = transformRootHtml(resolveAppletDocument(applet))
+            return@withContext ResolvedWebAsset(
+                bytes = html.toByteArray(Charsets.UTF_8),
+                mimeType = "text/html",
+                encoding = "utf-8",
+                sha256 = applet.indexSha256
+            )
+        }
+
+        null
+    }
+
+    private fun lookupPathShaInJson(manifestObj: JSONObject?, cleanPath: String): String {
+        if (manifestObj == null) return ""
+        val noLeadingSlash = cleanPath.removePrefix("/")
+        val candidates = listOf(
+            cleanPath,
+            noLeadingSlash,
+            "./$noLeadingSlash",
+            "${cleanPath.trimEnd('/')}/index.html",
+            "$cleanPath.html"
+        )
+        for (key in candidates) {
+            val v = manifestObj.optString(key).trim()
+            if (v.length == 64 && !key.startsWith("__")) return v
+        }
+        return ""
+    }
+
+    private fun buildUnreachableBundleDiagnosticHtml(
+        applet: InstalledAppletEntity,
+        sha256: String,
+        directUrl: String,
+        triedServers: List<String>
+    ): String {
+        val safeTitle = applet.title.replace("<", "&lt;").replace(">", "&gt;")
+        val serversList = (triedServers + BlossomClient.DEFAULT_BLOSSOM_SERVERS).distinct().joinToString(", ")
+        return """
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { margin:0; padding:24px; background:#000; color:#fff; font-family:system-ui,-apple-system,sans-serif; }
+    .box { max-width:520px; margin:24px auto; padding:20px; border-radius:16px; background:#141414; border:1px solid #9A0957; }
+    h2 { margin:0 0 8px; font-size:18px; color:#FF1493; }
+    p { margin:0 0 10px; font-size:13px; line-height:1.5; color:#ccc; }
+    .mono { font-family:monospace; font-size:11px; word-break:break-all; color:#E8DCC8; background:#090909; padding:10px; border-radius:10px; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h2>Blossom Blob Unreachable</h2>
+    <p>Could not fetch verified bundle bytes for <strong>$safeTitle</strong> from Blossom mirrors.</p>
+    <div class="mono">SHA-256: ${sha256.ifBlank { directUrl.ifBlank { "(none)" } }}<br/><br/>Tried servers: $serversList</div>
+  </div>
+</body>
+</html>
+        """.trimIndent()
     }
 
     suspend fun napStorageGet(appletId: String, key: String): String? =
@@ -804,6 +1172,25 @@ class ShellRepository(
                 trimmedContent.startsWith("<main", ignoreCase = true) ||
                 trimmedContent.startsWith("<section", ignoreCase = true)
 
+            val jsonContentMeta = if (trimmedContent.startsWith("{")) {
+                runCatching { JSONObject(trimmedContent) }.getOrNull()
+            } else null
+
+            // Also ingest JSON path maps if a publisher placed {"paths": {"/index.html": "<sha>"}} in content
+            jsonContentMeta?.optJSONObject("paths")?.let { pObj ->
+                val keys = pObj.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    val v = pObj.optString(k).trim()
+                    if (k.isNotBlank() && SHA256_HEX_REGEX.matches(v) && !pathMap.has(k)) {
+                        pathMap.put(k, v)
+                    }
+                }
+            }
+            if (pathIndexSha.isBlank()) {
+                pathIndexSha = pathMap.optString("/index.html").ifBlank { pathMap.optString("index.html") }
+            }
+
             val resolvedIndexSha = pathIndexSha
                 .ifBlank { fallbackHtmlSha }
                 .ifBlank { xTagSha }
@@ -815,6 +1202,8 @@ class ShellRepository(
 
             val rawTitle = event.tags.firstOrNull { it.size >= 2 && it[0] == "title" }?.get(1)?.ifBlank { null }
                 ?: event.tags.firstOrNull { it.size >= 2 && it[0] == "name" }?.get(1)?.ifBlank { null }
+                ?: jsonContentMeta?.optString("title")?.ifBlank { null }
+                ?: jsonContentMeta?.optString("name")?.ifBlank { null }
                 ?: event.tags.firstOrNull { it.size >= 2 && it[0] == "alt" }?.get(1)?.ifBlank { null }
                 ?: humanizeSlug(dTag, isNsite, event.pubkey)
             val cleanTitle = NsiteSpamFilter.sanitizeSingleLine(rawTitle).take(80)
@@ -822,7 +1211,9 @@ class ShellRepository(
             val rawDesc = event.tags.firstOrNull { it.size >= 2 && it[0] == "description" }?.get(1)?.ifBlank { null }
                 ?: event.tags.firstOrNull { it.size >= 2 && it[0] == "summary" }?.get(1)?.ifBlank { null }
                 ?: event.tags.firstOrNull { it.size >= 2 && it[0] == "about" }?.get(1)?.ifBlank { null }
-                ?: if (!contentLooksLikeHtml && trimmedContent.isNotBlank() && !trimmedContent.startsWith("{")) {
+                ?: jsonContentMeta?.optString("description")?.ifBlank { null }
+                ?: jsonContentMeta?.optString("about")?.ifBlank { null }
+                ?: if (!contentLooksLikeHtml && trimmedContent.isNotBlank() && jsonContentMeta == null) {
                     trimmedContent
                 } else {
                     if (isNsite) "Decentralized NIP-5A static Nsite on Blossom." else "Sandboxed NIP-5D Nostr web applet."
@@ -840,20 +1231,27 @@ class ShellRepository(
                 pathMap.put("__direct_url", directUrl)
             }
 
-            val serverFromTag = event.tags
-                .firstOrNull {
+            val serversFromTags = event.tags
+                .filter {
                     it.size >= 2 &&
                         (it[0] == "server" || it[0] == "blossom") &&
                         (it[1].startsWith("https://", ignoreCase = true) || it[1].startsWith("http://", ignoreCase = true))
                 }
-                ?.get(1)?.trim()
+                .map { it[1].trim().trimEnd('/') }
+                .distinct()
+            if (serversFromTags.size > 1) {
+                val srvArr = JSONArray()
+                serversFromTags.forEach { srvArr.put(it) }
+                pathMap.put("__servers", srvArr)
+            }
+
             val serverFromDirectUrl = if (directUrl.isNotBlank()) {
                 runCatching {
                     val uri = java.net.URI(directUrl)
                     if (uri.scheme != null && uri.host != null) "${uri.scheme}://${uri.host}" else null
                 }.getOrNull()
             } else null
-            val server = serverFromTag ?: serverFromDirectUrl ?: "https://blossom.primal.net"
+            val server = serversFromTags.firstOrNull() ?: serverFromDirectUrl ?: "https://blossom.primal.net"
 
             val npub = runCatching { NostrCrypto.encodeNpub(event.pubkey) }.getOrDefault(event.pubkey.take(16))
             val appletId = "${event.kind}:${event.pubkey}:$dTag"
@@ -908,6 +1306,50 @@ class ShellRepository(
                 "calc" in hay || "convert" in hay || "tool" in hay || "json" in hay -> "🧮"
                 isNsite -> "🌐"
                 else -> "🧩"
+            }
+        }
+
+        /**
+         * Returns bare `(mimeType, encoding)` pairs required by Android `WebResourceResponse`
+         * so Chromium accepts ES module scripts (`<script type="module">`), stylesheets, WASM, and SVG.
+         */
+        fun guessMimeType(path: String, bytes: ByteArray? = null): Pair<String, String?> {
+            val clean = path.substringBefore('?').substringBefore('#').lowercase()
+            val ext = clean.substringAfterLast('/', "").substringAfterLast('.', "")
+            return when (ext) {
+                "html", "htm" -> "text/html" to "utf-8"
+                "js", "mjs", "cjs" -> "text/javascript" to "utf-8"
+                "css" -> "text/css" to "utf-8"
+                "json", "webmanifest", "map" -> "application/json" to "utf-8"
+                "svg" -> "image/svg+xml" to "utf-8"
+                "xml" -> "application/xml" to "utf-8"
+                "txt", "md" -> "text/plain" to "utf-8"
+                "png" -> "image/png" to null
+                "jpg", "jpeg" -> "image/jpeg" to null
+                "webp" -> "image/webp" to null
+                "gif" -> "image/gif" to null
+                "avif" -> "image/avif" to null
+                "ico" -> "image/x-icon" to null
+                "wasm" -> "application/wasm" to null
+                "woff2" -> "font/woff2" to null
+                "woff" -> "font/woff" to null
+                "ttf" -> "font/ttf" to null
+                "otf" -> "font/otf" to null
+                "mp3" -> "audio/mpeg" to null
+                "wav" -> "audio/wav" to null
+                "ogg" -> "audio/ogg" to null
+                "mp4" -> "video/mp4" to null
+                "webm" -> "video/webm" to null
+                else -> {
+                    val head = bytes?.let {
+                        String(it, 0, minOf(it.size, 64), Charsets.UTF_8).trimStart()
+                    }.orEmpty()
+                    if (head.startsWith("<!DOCTYPE", ignoreCase = true) || head.startsWith("<html", ignoreCase = true)) {
+                        "text/html" to "utf-8"
+                    } else {
+                        "application/octet-stream" to null
+                    }
+                }
             }
         }
     }

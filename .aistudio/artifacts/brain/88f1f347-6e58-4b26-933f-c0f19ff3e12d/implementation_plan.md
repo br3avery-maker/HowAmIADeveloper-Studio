@@ -1,69 +1,78 @@
-# SovereignShell — Self-Publishing Nostr Napplet & Nsite Launcher
+# SovereignShell — Curated App Gallery & Clone-Stacking Storefront
 
-SovereignShell is an Android home-screen-style launcher and sandboxed runtime for **Nostr Applets (NIP-5D)** and **static Nsites (NIP-5A)**, complete with a built-in multi-account cryptographic signer vault, an in-app napplet/nsite authoring studio, and one-tap **self-publishing** that deploys both user-built applets and a standalone web replica of the shell itself to Blossom servers and Nostr relays.
+Transform SovereignShell's Discovery experience from a flat chronological stream into a **Home-screen-matched Curated App Gallery & Storefront** that automatically stacks clones, forks, and versions of NIP-5D Napplets and NIP-5A Nsites into layered tiles—while preserving a one-tap **Live Relay Feed** mode for real-time protocol power users.
+
+---
 
 ### User Review & Critical Decisions
 
 > [!IMPORTANT]
-> **Answering Your UX Question — Should "Publish" live in the Discovery Feed or in the Account Menu Drawer?**
-> **Recommended Choice: Primary home in the Account Menu Drawer, plus a contextual `+ Publish` pill inside the `Napplets | Nsites` Discovery Feed (Zero clutter on the Home Launcher).**
-> - **Why the Account Menu Drawer is Primary**: Publishing (`Napplet & Nsite Studio` + `Self-Publish Shell`) is an authoring and identity-bound operation tied to your active `npub`, Blossom servers, and relay set. Keeping it in the upper-right Account Menu Drawer preserves a pure, distraction-free OS launcher feel on your custom-wallpaper home screen—and puts **Self-Publish Shell** right next to your identity, relays, and Blossom settings.
-> - **Why the Discovery Feed gets a Secondary `+ Publish` Shortcut**: When browsing the full-page `Napplets | Nsites` feed to install apps, having a compact `+ Publish` header button (and a `"Fork to Studio"` action on existing open manifests) creates a seamless creator loop from discovering community apps to publishing your own into that exact feed.
-> *(If you prefer Publish exclusively in one place, click Revise or reply before proceeding and we will lock it to that single location.)*
+> The decisions below incorporate all preferences confirmed during interactive planning alongside existing SovereignShell capabilities (Built-in Signer, Spam Bot Shield, NIP-5D/NIP-5A runtime, and Creator Studio).
 
-- **Confirmed Bridge Architecture**: Sandboxed **NIP-5D `postMessage` NAPs** (`NAP-SIGNER`, `NAP-RELAY`, `NAP-STORAGE`, `NAP-INTENT`) by default, with an explicit per-applet toggle to grant **`NIP-07` (`window.nostr`)** injection for classic Nostr web apps and nsites.
-- **Confirmed Self-Publishing Scope**: Includes both an **in-app code/manifest studio** to build and publish napplets/nsites AND a **Self-Publish Shell** engine that compiles a working web version of the launcher (preloaded with your public pinned apps and NIP-5D host bridge) and publishes it as your own NIP-5A `nsite`.
-- **Confirmed Built-in Signer**: Hardware-encrypted **multi-account `nsec` vault** (`npub`/`nsec` generation, import, and account switching) with **granular per-applet permission prompts** (Allow Once, Always Allow for Event Kind, Reject) and an audit log.
-- **Confirmed Shell UX & Layout**: Home-screen style launcher with customizable wallpaper background, instant **Icon Grid vs. Detailed List** view toggle, a top **Search Bar** that expands into a full-page **`Napplets | Nsites`** discovery and install feed, and an **upper-right Account Avatar** that opens the right-hand slide-over **Menu Drawer**.
+- **Confirmed Decision 1 — Gallery Default + Optional Live Feed**: Opening Search / Discovery launches the **Curated Gallery** by default, using the exact same custom wallpaper backdrop and **Icon Grid / Specimen List** layout toggle as the Home Screen, with a header toggle to switch into the chronological **Live Feed** at any time.
+- **Confirmed Decision 2 — Multi-Signal Clone & Version Stacking with Picker Sheet**: Variants, forks, and re-uploads sharing a Blossom `SHA-256` bundle hash, canonical `d-tag` slug, or normalized title stem are collapsed into a single **layered stack tile/card** (`×N` badge) that opens a **Version & Clone Picker Bottom Sheet** to inspect authors, compare hashes, install, or launch any specific variant.
+- **Confirmed Decision 3 — Featured Picks + Categories + NIP-51 Curation Lists**: Gallery curation combines built-in **Featured Picks**, smart **Category Chips** (*All*, *Featured*, *NIP-51 Curated*, *Napplets*, *Nsites*, *Social*, *Tools*, *Games & Art*, *Zines*), and live **NIP-51 (`Kind 30003` / `30001`) App Bookmark Lists** that users can both browse from relays and sign/publish with their own Built-in Signer.
 
 ---
 
 ### 1. Overview & Core Concept
 
-- **What It Does**: Turns Android into a sovereign, decentralized mini-app OS. Users pin Napplets (NIP-5D kinds `35129` / `15129`) and Nsites (NIP-5A kinds `35128` / `15128`) onto a personalized wallpaper launcher, run them inside isolated WebView containers backed by a native Nostr relay pool and BIP-340 Schnorr signer, author or fork applets on-device, and publish static blobs to Blossom (`BUD-02` / `kind 24242`) with signed manifest events to Nostr relays.
-- **Target Audience / Persona**: Nostr power users, indie sovereign-web creators, and privacy-conscious users who want composable micro-apps without centralized app stores, leaked private keys, or single-server hosting dependencies.
-- **Key Value**: Eliminates both key-exposure risk (no pasting `nsec` into web apps) and hosting lock-in—every installed applet is verifiable by SHA-256 Blossom hashes, and the shell itself can reproduce and publish itself to any Blossom + relay set as a live web `nsite`.
+- **What It Does**: Replaces the single-mode discovery feed with a cohesive Nostr App Store & Gallery that mirrors the Home Launcher's spatial grid/list ergonomics, groups duplicate clones and iterative versions into clean visual stacks, surfaces high-signal apps through curated shelves and NIP-51 lists, and keeps a toggleable raw relay stream one tap away.
+- **Target Audience / Persona**: Sovereign Nostr builders and everyday users who want a clean, zero-clutter app store to browse, verify, pin, fork, and curate decentralized Napplets and Nsites without wading through duplicate forks or relay noise.
+- **Key Value**:
+  - **Visual & Spatial Continuity**: Discovery looks and behaves like an extension of the Home Launcher (same custom wallpaper + scrim, same 4/6-column Icon Grid vs. BreBre Specimen List toggle).
+  - **Zero Clone Clutter**: Dozens of forks, re-deployments, or mirror uploads collapse into one tactile stacked icon with transparent provenance inspection.
+  - **Decentralized Curation**: Native NIP-51 list ingestion and one-tap cryptographic bookmarking turn every user into a sovereign gallery curator.
 
 ---
 
 ### 2. User Experience & Visual Design
 
 - **Key User Flows**:
-  1. **First Launch & Identity Setup**: Users land immediately on a curated atmospheric launcher pre-stocked with working starter Napplets (e.g., *Micro-Notes*, *Relay Pulse*, *Profile Card*) so the shell is tactile right away. Tapping the upper-right Account icon opens the Drawer to generate a fresh Nostr keypair (`nsec`/`npub`) or import an existing `nsec` into the encrypted multi-account vault.
-  2. **Home Launcher Customization & Switching**: On the Home Screen, users tap the **Grid / List toggle** beside the search bar to switch between a crisp OS-style **Icon Grid** (squircle glass badges + short titles over the custom wallpaper) and a **Detailed List** (icon, title, author `npub`, protocol badge `NIP-5D` / `NSITE`, and full description). Via the Account Drawer, users pick any photo via the system Photo Picker (or choose built-in procedural dark mesh wallpapers) with adjustable scrim contrast.
-  3. **Full-Page Discovery & Install (`Napplets | Nsites`)**: Tapping the Search Bar smoothly expands into a full-screen discovery surface with segmented **`Napplets` | `Nsites`** tabs, live relay search/filtering (by title, `d`-tag, `npub`, or URL), protocol inspection (Blossom hashes & requested capabilities), one-tap **Install to Home**, and a contextual **`+ Publish`** shortcut.
-  4. **Running an Applet & Signer Approval Sheet**: Tapping a launcher item opens the Runtime Container with a minimal floating shell pill (showing applet identity, active `npub`, NIP-5D/NIP-07 badge, and close/minimize controls). Whenever an applet requests `signEvent`, `nip04/nip44` encryption, or relay publishing, a native Material 3 **Signer Permission Bottom Sheet** slides up showing the exact event `kind`, JSON payload preview, active account, and *Allow Once / Always Allow Kind / Deny* actions.
-  5. **In-App Studio & Self-Publishing the Shell**: Opening **Creator Studio** (from the Account Drawer or the Discovery Feed's `+ Publish` button) lets users write or edit multi-file HTML/CSS/JS applets, preview them live with the NIP-5D bridge, upload all assets to configured Blossom servers (`PUT /upload` authorized with signed `kind 24242` tokens), and broadcast NIP-5D (`35129`) or NIP-5A (`15128` / `35128`) manifests. Selecting **Self-Publish Shell** in the Drawer packages a complete standalone HTML/JS web shell (implementing the same launcher layout, your pinned public app directory, and NIP-5D iframe host broker) and deploys it as your own live `nsite`, outputting shareable gateway URLs.
+  1. **Enter Curated Gallery from Home**: Tapping the Home search bar opens the Curated Gallery over the user's active wallpaper (`Cyber-Zine`, `BreBre Neon Orbs`, `Agent Circuit`, or custom photo).
+  2. **Browse Featured Shelf & Category Grid/List**:
+     - At the top of *Curated Gallery* mode (when no search query is active), a compact horizontal **Featured & NIP-51 Spotlight** strip highlights standout Napplets and Nsites.
+     - Horizontal **Filter Chips** (*All*, *Featured*, *NIP-51 Lists*, *Napplets*, *Nsites*, *Social*, *Tools*, *Games & Art*, *Zines*) filter the main **Home-matched Icon Grid** (or **Description List**, toggled via the same top-bar Grid/List button used on Home).
+  3. **Inspect Stacked Clones & Versions**:
+     - Apps with a single edition open a sleek **App Store Sheet** (showing description, protocol badge, Blossom hash, `Install / Pin`, `Open`, `Curate to NIP-51`, and `Fork to Studio`).
+     - Apps with `2+` clones, forks, or versions display **offset stacked backing plates** behind their 62dp launcher tile (or Specimen card) plus a neon `×N` stack counter pill. Tapping opens the **Version & Clone Picker Sheet**, listing all variants ranked by trust/freshness, flagging `Identical SHA-256 Clone` vs. `Modified Fork`, and allowing per-edition `Pin`, `Launch`, or `Fork`.
+  4. **Curate & Publish NIP-51 App Lists**: Tapping the star/bookmark button on any app or variant adds it to the active identity's curated list and optionally signs & broadcasts a `Kind 30003` (`d:napplets`) NIP-51 Bookmark Set to connected relays via the Built-in Signer.
+  5. **Switch to Optional Live Feed**: Tapping the `Gallery | Live Feed` pill in the top bar cross-fades to the chronological relay stream (showing individual unstacked manifest events as they arrive, protected by the toggleable **Spam Shield**).
 
 - **Visual Identity & Theme**:
-  - *Aesthetic Direction*: **Translucent Glass Launcher & Sovereign Cipher Deck** — clean OS-grade spatial clarity over user-selected photography, paired with high-contrast dark frosted glass (`SurfaceContainer` with alpha + subtle 1dp hairline borders) so icons and descriptions stay legible over any custom background.
-  - *Color Palette & Mood*: Deep obsidian base (`#0B0E14`), frosted slate glass surfaces (`#151A24` at 82%–92% opacity), electric Nostr violet primary (`#9B72FF`), cyber-mint verification accent (`#2EE59D` for verified SHA-256 Blossom blobs and approved signer rules), and amber caution (`#FFB020` for unsigned/NIP-07 raw permissions).
-  - *Typography & Hierarchy*: Bundled local Google Fonts via `font-util`: **Space Grotesk** for expressive launcher headers, sheet titles, and tab labels; **Plus Jakarta Sans** for crisp descriptions and UI controls; **JetBrains Mono** for `npub`/`nsec` keys, SHA-256 Blossom hashes, event kinds, and the in-app code editor.
-  - *Component Styling & Layout*: Edge-to-edge full-bleed wallpaper canvas respecting status bar and gesture navigation insets; top bar housing the pill Search trigger, compact Grid/List view toggle, and upper-right circular Account Avatar (with active-account ring indicator) that opens a right-aligned `ModalNavigationDrawer` / slide-over sheet. Adaptive layout switches from 4-column icon grid on phones to wider multi-column / split Studio preview on tablets and foldables.
-- **Interactive Feedback & Motion**: Shared-bounds / smooth vertical expansion when tapping the Search Bar into the full-page `Napplets | Nsites` feed; spring-animated layout morphing when toggling Icon Grid ↔ Description List; live step-by-step cryptographic progress pills during Blossom SHA-256 hashing, `kind 24242` upload, and multi-relay `OK` acknowledgments.
+  - *Aesthetic Direction*: **BreBre Neon Dark × Punk Cyber-Zine Storefront**—matching the Home Screen's exact glassmorphic launcher aesthetic rather than a plain black utility list.
+  - *Color Palette & Mood*:
+    - Backdrop: User's active `LauncherWallpaperLayer` + adjustable dark scrim (`#000000` at `0.45–0.75` alpha for crisp storefront legibility).
+    - Primary Surfaces: `BreGray850` (`#1A1A1A` at `94%` alpha) tiles and Specimen cards with `BrePinkDark2` (`#9A0957`) borders for NIP-5D Napplets and `ZineBoneCream` (`#E8DCC8`) borders for NIP-5A Nsites.
+    - Accents & Signals: `BreDeepPink` (`#FF1493`) active pills and `×N` stack badges, `BreLightPink` (`#FFB6D9`) secondary labels, and `CyberMint` (`#2EE59D`) `Pinned` / `Spam Shield` verification indicators.
+  - *Typography & Hierarchy*:
+    - Bold condensed single-line tile titles (`labelLarge`) and Specimen card headers (`titleSmall`), paired with non-wrapping `labelSmall` protocol & version badges (`NIP-5D`, `NSITE`, `×3`).
+  - *Component Styling & Layout*:
+    - **Adaptive Grid Parity**: Uses `BoxWithConstraints` matching `LauncherHomeScreen` (`4` columns under `600.dp`, `6` columns on tablets/foldables) in `ICON_GRID` mode, and compact Specimen cards in `DESCRIPTION_LIST` mode.
+    - **Tactile Card Stacking**: Multi-version tiles render two subtle offset shadow frames (`+3.dp` and `+6.dp` top-end offset) behind the primary 62dp icon squircle so stacked editions are immediately recognizable at a glance.
+
+- **Interactive Feedback & Motion**:
+  - Spring-driven `AnimatedContent` transitions (`< 280ms`) when toggling between **Curated Gallery** and **Live Feed**, or between **Icon Grid** and **Description List**.
+  - Interactive bottom sheet transitions for the **Storefront & Version Picker Sheet**, with instant optimistic `Pinned` badge updates and floating status banners when signing NIP-51 curation events.
 
 ---
 
 ### 3. Key Product Decisions & Trade-Offs
 
-- **Decision 1: Hybrid Placement for Publishing (Account Drawer Primary + Feed Shortcut)**
-  - *Chosen Approach*: Place **Creator Studio** and **Self-Publish Shell** prominently inside the upper-right Account Menu Drawer, plus a compact `+ Publish` action inside the full-page `Napplets | Nsites` discovery header (and `"Fork to Studio"` on feed items).
-  - *Why*: Keeps the Home Launcher calm and personal (dedicated strictly to launching pinned apps and searching), while giving creators one-tap access whether they are managing their identity in the Drawer or browsing the community catalog.
-  - *Alternatives Considered*: Putting a permanent floating action button on the Home Launcher was rejected because it obscures custom wallpapers and makes the home screen feel like a document app rather than an OS shell.
+- **Decision 1 — Shared Launcher Layout Engine Across Home & Gallery**
+  - *Chosen Approach*: Render the Curated Gallery over `LauncherWallpaperLayer` using the same responsive 4/6-column Icon Grid and Specimen Description List modes as `LauncherHomeScreen`, with a persistent installed/pinned badge on tiles already on the user's Home screen.
+  - *Why*: Eliminates visual jarring between Home and Discovery and directly fulfills the Home-screen layout parity goal while keeping touch targets >= `48.dp`.
+  - *Alternatives Considered*: Separate multi-column store cards unrelated to Home tiles—rejected because it breaks spatial consistency with the Home launcher.
 
-- **Decision 2: True NIP-5D Sandbox Isolation + Explicit Per-Applet NIP-07 Opt-In**
-  - *Chosen Approach*: Load Napplets inside a sandboxed iframe/WebView context without `window.nostr`, brokering all capabilities via JSON `postMessage` (`NAP-SIGNER`, `NAP-RELAY`, `NAP-STORAGE`, `NAP-INTENT`). Provide an explicit per-applet toggle ("Enable Legacy NIP-07 `window.nostr`") for standard Nsites that expect browser-extension signing.
-  - *Why*: Strict NIP-5D compliance protects users from rogue scripts scraping storage or spamming signatures, while optional NIP-07 ensures 100% compatibility with the broader ecosystem of existing Nostr web apps and nsites.
-  - *Alternatives Considered*: Injecting `window.nostr` everywhere was rejected because NIP-5D explicitly forbids exposing `window.nostr` inside untrusted napplet sandboxes.
+- **Decision 2 — Deterministic Union-Find Multi-Signal Clone & Version Stacker**
+  - *Chosen Approach*: Group apps within the same protocol class (`Napplet` vs. `Nsite`) using a union-find pass across three signals: (1) identical non-empty `indexSha256` Blossom hash, (2) matching normalized `d-tag` slug (excluding generic `"root"`), and (3) matching normalized canonical title stem (stripping `"Remix"`, `"Fork"`, and version suffixes like `"v2"`).
+  - *Why*: Catches exact byte-for-byte re-uploads by different `npub`s *and* intentional forks/new versions of the same app, while never falsely merging unrelated `"root"` Nsites.
+  - *Alternatives Considered*: Grouping by `d-tag` alone—misses `"Remix"` forks with `-fork` slugs and misses byte-identical clones published under different `d-tag`s.
 
-- **Decision 3: Hardware-Backed Local Key Vault + Decentralized Relay/Blossom Persistence**
-  - *Chosen Approach*: Encrypt `nsec` private keys on-device using **Android Keystore (`AES/GCM/NoPadding`)**, persist launcher pins, per-applet permissions, studio projects, and wallpaper URI locally via **Room + DataStore**, and publish/sync public manifests and blobs directly to **Nostr Relays (OkHttp WebSockets)** and **Blossom HTTP servers**.
-  - *Why*: In Nostr, private keys (`nsec`) must never leave the device or touch centralized cloud databases, while Nostr relays and Blossom servers natively serve as the user's decentralized cloud backend.
-  - *Alternatives Considered*: Cloud-storing keys or requiring Google Sign-In was rejected as incompatible with sovereign Nostr key custody.
-
-- **Decision 4: Pure-Kotlin BIP-340 Schnorr, NIP-19 Bech32 & NIP-04/NIP-44 Crypto Engine**
-  - *Chosen Approach*: Implement deterministic BIP-340 `secp256k1` Schnorr signing/verification, SHA-256 content hashing, Bech32 (`npub`, `nsec`, `naddr`), and NIP-04/NIP-44 payload encryption in clean, audited Kotlin without native `.so` JNI blobs.
-  - *Why*: Guarantees zero ABI crashes across Android architectures, full Google Play policy compliance, and fast local verification.
+- **Decision 3 — Hybrid Curation (Featured + Heuristic Quality + NIP-51 Kind 30003/30001)**
+  - *Chosen Approach*: Combine built-in Featured templates/apps, automatic category tagging, and real Nostr NIP-51 (`Kind 30003` Bookmark Sets & `Kind 30001` Categorized Lists referencing `35129:...` / `35128:...` `a`-tags) both fetched from relays and authored locally via the Built-in Signer.
+  - *Why*: Guarantees the Curated Gallery feels rich and organized immediately on first launch while embracing authentic, decentralized Nostr curation standards.
+  - *Alternatives Considered*: Hardcoded static lists only—rejected because users could not curate or sync real Nostr app lists across relays.
 
 ---
 
@@ -72,61 +81,68 @@ SovereignShell is an Android home-screen-style launcher and sandboxed runtime fo
 - **Architecture & Component Diagram**:
 
 ```text
-┌────────────────────────────────────────────────────────────────────────────┐
-│                        JETPACK COMPOSE UI SHELL                            │
-│                                                                            │
-│  ┌──────────────────────────────┐    ┌──────────────────────────────────┐  │
-│  │     Home Screen Launcher     │    │  Right-Side Account Menu Drawer  │  │
-│  │ • Custom Wallpaper + Scrim   │    │ • Multi-Account Switcher & Vault │  │
-│  │ • Top Search Pill Trigger    │◄──►│ • Creator Studio (New / Drafts)  │  │
-│  │ • Icon Grid ↔ List Toggle    │    │ • Self-Publish Shell to Nsite    │  │
-│  │ • Upper-Right Account Avatar │    │ • Signer Permissions & Audit Log │  │
-│  └──────────────┬───────────────┘    │ • Relays, Blossom & Wallpaper    │  │
-│                 │                    └─────────────────┬────────────────┘  │
-│       ┌─────────┴──────────┐                           │                   │
-│       ▼                    ▼                           ▼                   │
-│  ┌───────────────────┐  ┌────────────────────┐  ┌───────────────────────┐  │
-│  │ Full-Page Search  │  │  Applet WebView    │  │  Creator Studio &     │  │
-│  │ & Discovery Feed  │  │  Runtime Host      │  │  Publisher Sheet      │  │
-│  │ • Napplets Tab    │  │ • NIP-5D Sandbox   │  │ • HTML/CSS/JS Editor  │  │
-│  │ • Nsites Tab      │  │ • Optional NIP-07  │  │ • Live Bridge Preview │  │
-│  │ • Install / Fork  │  │ • Signer Approval  │  │ • Blossom + Manifest  │  │
-│  │ • + Publish Pill  │  │   Bottom Sheet     │  │   Deployment Pipeline │  │
-│  └────────┬──────────┘  └─────────┬──────────┘  └───────────┬───────────┘  │
-└───────────┼───────────────────────┼─────────────────────────┼──────────────┘
-            │                       │                         │
-            ▼                       ▼                         ▼
-┌────────────────────────────────────────────────────────────────────────────┐
-│                     DOMAIN BROKERS & VIEWMODEL LAYER                       │
-│                                                                            │
-│  ┌─────────────────────┐  ┌───────────────────────┐  ┌──────────────────┐  │
-│  │  NAP & NIP-07       │  │ Built-in Signer &     │  │ Nsite & Shell    │  │
-│  │  Message Broker     │  │ Permission Engine     │  │ Self-Publisher   │  │
-│  │ • NAP-SIGNER        │  │ • BIP-340 Schnorr     │  │ • SHA-256 Hasher │  │
-│  │ • NAP-RELAY         │  │ • Bech32 (NIP-19)     │  │ • Kind 24242 Auth│  │
-│  │ • NAP-STORAGE       │  │ • NIP-04 / NIP-44     │  │ • Kind 15128 /   │  │
-│  │ • NAP-INTENT        │  │ • Per-App Policy Gate │  │   35128 / 35129  │  │
-│  └──────────┬──────────┘  └───────────┬───────────┘  └────────┬─────────┘  │
-└─────────────┼─────────────────────────┼───────────────────────┼────────────┘
-              │                         │                       │
-              ▼                         ▼                       ▼
-┌──────────────────────────┐ ┌──────────────────────┐ ┌──────────────────────┐
-│ Nostr & Blossom Network  │ │ Android Keystore     │ │ Room DB + DataStore  │
-│ • OkHttp WSS Relay Pool  │ │ • AES-GCM Encrypted  │ │ • Installed Apps     │
-│ • Blossom HTTP PUT/GET   │ │   nsec Account Vault │ │ • Applet NAP Storage │
-│ • Blob SHA-256 Verifier  │ │                      │ │ • Policies & Drafts  │
-└──────────────────────────┘ └──────────────────────┘ └──────────────────────┘
+┌───────────────────────────────────────────────────────────────────────────┐
+│                          RelayPoolClient (WebSockets)                     │
+│  • Split REQ Filters:                                                     │
+│    1. NIP-5D Napplets (35129, 15129, 5129)                                │
+│    2. NIP-5A Nsites   (35128, 15128)                                      │
+│    3. NIP-51 Curation (30003, 30001 with #a / d="napplets"|"nsites")      │
+└─────────────────────────────────────┬─────────────────────────────────────┘
+                                      │ Incoming NostrEvent Stream
+                                      ▼
+┌───────────────────────────────────────────────────────────────────────────┐
+│                  ShellRepository & Local Room Persistence                 │
+│  ┌─────────────────────────┐  ┌────────────────────┐  ┌─────────────────┐ │
+│  │ NsiteSpamFilter         │  │ InstalledApplets   │  │ CuratedBookmarks│ │
+│  │ • 5 Bot Fingerprints    │─▶│ Table (Catalog +   │  │ (NIP-51 a-tag   │ │
+│  │ • Cross-Pubkey Clusters │  │ Pinned Flag)       │  │ Coordinates)    │ │
+│  └─────────────────────────┘  └─────────┬──────────┘  └────────┬────────┘ │
+└─────────────────────────────────────────┼──────────────────────┼──────────┘
+                                          │                      │
+                                          ▼                      ▼
+┌───────────────────────────────────────────────────────────────────────────┐
+│                     CatalogStacker & Gallery Engine                       │
+│  • Union-Find Clustering: SHA-256 Blob Hash ∪ Canonical dTag ∪ Title Stem │
+│  • Representative Ranking: Pinned > NIP-51 Curated > Local > Completeness │
+│  • Category & Curation Classifier: Featured | NIP-51 | Social | Tools ... │
+└─────────────────────────────────────────┬─────────────────────────────────┘
+                                          │ StateFlow<GalleryUiModel>
+                                          ▼
+┌───────────────────────────────────────────────────────────────────────────┐
+│                DiscoveryFeedScreen (Storefront + Live Feed)               │
+│  ┌─────────────────────────────────────────────────────────────────────┐  │
+│  │ Top Bar: Back • Search Pill • Grid/List Toggle • Gallery|Feed • +Pub│  │
+│  └──────────────────┬───────────────────────────────────┬──────────────┘  │
+│                     │ (Gallery Mode - Default)          │ (Live Feed Mode)│
+│                     ▼                                   ▼                 │
+│  ┌──────────────────────────────────────┐  ┌───────────────────────────┐  │
+│  │ Home-Matched Wallpaper + Scrim       │  │ Chronological Relay Stream│  │
+│  │ • Featured & NIP-51 Spotlight Strip  │  │ • Unstacked Live Cards    │  │
+│  │ • Category Filter Chips + Spam Shield│  │ • Spam Shield Counter     │  │
+│  │ • Stacked 4/6-Col Icon Grid OR       │  │ • Instant Install / Fork  │  │
+│  │   Stacked BreBre Specimen List       │  └───────────────────────────┘  │
+│  └──────────────────┬───────────────────┘                                 │
+│                     │ Tap Stacked Tile / Card                             │
+│                     ▼                                                     │
+│  ┌─────────────────────────────────────────────────────────────────────┐  │
+│  │          App Store & Stacked Version Picker Bottom Sheet            │  │
+│  │  • Primary Summary + "Curate to NIP-51 (Sign Kind 30003)" Toggle    │  │
+│  │  • Variant List: Publisher npub • Kind/dTag • Hash Diff Badge       │  │
+│  │  • Per-Edition Actions: Install/Pin • Launch • Fork to Studio       │  │
+│  └─────────────────────────────────────────────────────────────────────┘  │
+└───────────────────────────────────────────────────────────────────────────┘
 ```
 
 - **Data Model & State**:
-  - **VaultAccount**: `npub`, display alias, avatar color/metadata, hardware-wrapped `nsec` ciphertext + IV, active flag.
-  - **InstalledApplet**: Unique coordinate (`kind:pubkey:d-tag` or root `pubkey`), type (`NAPPLET` vs `NSITE`), title, summary description, icon path/emoji, bridge mode (`NIP_5D` or `NIP_07`), Blossom server hints, path-to-SHA256 manifest map, pin order, and cached offline bundle.
-  - **SignerPolicy & AuditEntry**: Scoped to `(accountPubkey, appletId, capability, eventKind)` storing `ALLOW_ALWAYS` or `DENY`, plus timestamped history of signed/rejected requests.
-  - **StudioProject**: Local editable multi-file map (`/index.html`, `/style.css`, `/app.js`), target deployment type (`NAPPLET_35129`, `NSITE_35128`, `ROOT_NSITE_15128`), `d`-tag identifier, title, description, and last published manifest event ID.
-  - **LauncherPreferences**: View mode (`ICON_GRID` vs `DESCRIPTION_LIST`), custom background image URI or preset theme ID, wallpaper dim scrim intensity, configured Nostr relay URLs, and Blossom server URLs.
+  - **`CuratedBookmarkEntity` (Room)**: Stores curated coordinate keys (`coordinate = "$kind:$authorPubkey:$dTag"`), source (`LOCAL_USER` vs. `REMOTE_NIP51`), curator `npub`, list `dTag`, and timestamp so NIP-51 curations persist offline and survive restarts.
+  - **`GalleryCategory` Enum**: `ALL`, `FEATURED`, `NIP51_CURATED`, `NAPPLETS`, `NSITES`, `SOCIAL`, `TOOLS`, `GAMES_ART`, `ZINES`.
+  - **`DiscoveryDisplayMode` Enum**: `CURATED_GALLERY` (default, stacked) and `LIVE_FEED` (optional unstacked chronological stream).
+  - **`AppletVariantRelation` Enum**: `PRIMARY`, `IDENTICAL_CLONE` (same `indexSha256`), `VERSION_OR_FORK` (different `indexSha256`, shared slug/stem).
+  - **`StackedAppletGroup`**: Holds `groupId`, `primary: InstalledAppletEntity`, `variants: List<StackedVariantItem>`, `isCuratedNip51: Boolean`, `isFeatured: Boolean`, `categories: Set<GalleryCategory>`, and `anyInstalled: Boolean`.
 
 - **Interactive Component & State Mapping**:
-  - **Launcher Top Bar & Canvas**: Tapping the Search Pill transitions `LauncherUiState` to the full-screen `DiscoveryOverlay` with instant keyboard focus; tapping the Grid/List icon flips `LauncherViewMode` in DataStore and animates item cards; tapping the upper-right Account Avatar opens the right-side Drawer; long-pressing any pinned applet opens quick actions (*Applet Permissions, Toggle NIP-07, View Manifest, Fork to Studio, Unpin*).
-  - **Discovery Feed (`Napplets | Nsites`)**: Switching tabs updates live OkHttp WebSocket `REQ` filters (`kinds: [35129, 15129]` for Napplets; `kinds: [35128, 15128]` for Nsites) merged with curated featured applets so discovery works even on slow relays. Tapping **Install** verifies manifest structure, caches entry metadata in Room, and pins it to the Home Launcher.
-  - **Applet Runtime & Signer Prompt**: Incoming `postMessage` envelopes (`{ id, type: "signer.signEvent" | "relay.req" | "storage.set" ... }`) or `window.nostr` calls suspend on a `CompletableDeferred` channel. If no `ALLOW_ALWAYS` policy matches, `PendingSignRequest` triggers the native Signer Bottom Sheet; user approval signs the payload with the active vault key and resolves the exact message ID back to the WebView.
-  - **Creator Studio & Self-Publish Engine**: Editing files updates an in-memory/Room draft with instant live preview. Tapping **Publish** hashes each file (`SHA-256`), mints short-lived Blossom `kind 24242` upload tokens (`["t", "upload"]`, `["x", sha256]`, `["expiration", ...]`), uploads blobs via `PUT /upload`, constructs the NIP-5A (`["path", "/index.html", sha256]`) or NIP-5D manifest event, signs it, broadcasts to all active relays, and returns verifiable gateway links. **Self-Publish Shell** generates a standalone single-page HTML/CSS/JS launcher bundle containing the user's public pinned catalog and a browser-side NIP-5D host runtime, then runs the exact same Blossom + NIP-5A `nsite` publishing pipeline.
+  - **Mode Switch (`Gallery | Live Feed`)**: Mutates `discoveryDisplayMode` in `ShellViewModel` (persisted in `LauncherPreferencesRepository` so user preference sticks) and cross-fades between the stacked Gallery canvas and unstacked chronological Feed.
+  - **Layout Toggle (`Grid | List`)**: Reuses `LauncherViewMode` (`ICON_GRID` vs. `DESCRIPTION_LIST`) so users switch seamlessly between 62dp stacked launcher icons and detailed Specimen cards.
+  - **Category & Search Filtering**: Reactive `combine` pipeline filters `StackedAppletGroup` items by active `GalleryCategory` chip and search query (matching across *any* variant's title, `d-tag`, description, or publisher `npub` in the stack!).
+  - **Tile / Card Tap -> Version Picker Sheet**: Sets `selectedStackGroup` state, opening a Material 3 `ModalBottomSheet` displaying the primary manifest header, NIP-51 star/publish button, and every stacked clone/fork/version with individual `Install / Unpin`, `Open`, and `Fork` buttons.
+  - **Curate & Publish NIP-51 List**: Toggles local bookmark membership immediately and offers a one-tap `"Sign & Sync NIP-51 List"` action that routes through the Built-in Signer to sign and broadcast a `Kind 30003` event (`["d", "napplets"]`, plus `["a", "<kind>:<pubkey>:<dTag>"]` tags for all starred items) to connected relays.

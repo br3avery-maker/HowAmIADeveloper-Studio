@@ -99,3 +99,14 @@ data class SignerAuditEntity(
     val approved: Boolean,
     val summary: String
 )
+
+@Entity(tableName = "curated_bookmarks", primaryKeys = ["coordinate", "curatorPubkey"])
+data class CuratedBookmarkEntity(
+    val coordinate: String, // "$kind:$authorPubkey:$dTag"
+    val curatorPubkey: String,
+    val curatorNpub: String,
+    val listSlug: String = "sovereign-gallery",
+    val listTitle: String = "Curated Picks",
+    val isLocalCurator: Boolean = false,
+    val createdAt: Long = System.currentTimeMillis()
+)

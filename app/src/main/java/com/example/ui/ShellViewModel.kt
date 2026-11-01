@@ -6,6 +6,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.example.data.CatalogStacker
+import com.example.data.DiscoveryDisplayMode
 import com.example.data.GraphicTemplatePreset
 import com.example.data.InstalledAppletEntity
 import com.example.data.LauncherPrefs
@@ -16,6 +18,7 @@ import com.example.data.PublishDeploymentReport
 import com.example.data.ShellRepository
 import com.example.data.SignerAuditEntity
 import com.example.data.SignerPolicyEntity
+import com.example.data.StackedAppletGroup
 import com.example.data.StarterCatalog
 import com.example.data.VaultAccountEntity
 import com.example.data.WallpaperStyle
@@ -160,6 +163,28 @@ class ShellViewModel(
         arr.first().blockedSpamCount
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 
+    val stackedGalleryGroups: StateFlow<List<StackedAppletGroup>> = combine(
+        catalogApplets,
+        repository.curatedBookmarksFlow,
+        activeAccount
+    ) { visibleItems, bookmarks, active ->
+        CatalogStacker.buildStackedGroups(
+            items = visibleItems,
+            bookmarks = bookmarks,
+            localPubkeyHex = active?.pubkeyHex.orEmpty()
+        )
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val localCuratedCount: StateFlow<Int> = combine(
+        repository.curatedBookmarksFlow,
+        activeAccount
+    ) { bookmarks, active ->
+        val pk = active?.pubkeyHex.orEmpty()
+        bookmarks.count {
+            it.isLocalCurator || (pk.isNotBlank() && it.curatorPubkey.equals(pk, ignoreCase = true))
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
     val managedRelays: StateFlow<List<ManagedRelayItem>> = repository.managedRelaysFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -181,9 +206,10 @@ class ShellViewModel(
     fun navigateTo(destination: ShellDestination) {
         if (destination is ShellDestination.CreatorStudio && destination.forkSource != null) {
             val src = destination.forkSource
+            val forkDTag = "${src.dTag}-fork".take(13)
             _studioDraft.value = StudioDraftState(
                 title = "${src.title} Remix",
-                dTag = "${src.dTag}-fork".take(13),
+                dTag = forkDTag,
                 description = src.description,
                 iconGlyph = src.iconGlyph,
                 targetKind = src.kind,
@@ -191,6 +217,18 @@ class ShellViewModel(
                 css = src.inlineCss.ifBlank { StarterCatalog.COMMON_APPLET_CSS.trimIndent() },
                 js = src.inlineJs.ifBlank { StudioDraftState.DEFAULT_STUDIO_JS }
             )
+            if (src.inlineHtml.isBlank()) {
+                viewModelScope.launch {
+                    runCatching { repository.resolveAppletDocument(src) }
+                        .onSuccess { fetchedDoc ->
+                            if (fetchedDoc.isNotBlank()) {
+                                _studioDraft.update { current ->
+                                    if (current.dTag == forkDTag) current.copy(html = fetchedDoc) else current
+                                }
+                            }
+                        }
+                }
+            }
         }
         _latestDeployment.value = null
         navStack.addLast(destination)
@@ -230,6 +268,18 @@ class ShellViewModel(
         }
     }
 
+    fun toggleDiscoveryDisplayMode() {
+        viewModelScope.launch {
+            val current = launcherPrefs.value.discoveryMode
+            repository.prefsRepo.toggleDiscoveryMode(current)
+            val switchedToFeed = current == DiscoveryDisplayMode.CURATED_GALLERY
+            showBanner(
+                if (switchedToFeed) "Switched to Live Relay Feed"
+                else "Switched to Curated App Gallery"
+            )
+        }
+    }
+
     fun pickCustomWallpaper(uri: Uri) {
         viewModelScope.launch {
             val savedPath = repository.copyPickedImageToInternalFile(uri, "wallpapers", "bg")
@@ -259,6 +309,16 @@ class ShellViewModel(
         viewModelScope.launch {
             repository.prefsRepo.setBlossomServer(url)
             showBanner("Blossom server set to ${url.trim()}")
+        }
+    }
+
+    fun setOpenNsitesExternally(enabled: Boolean) {
+        viewModelScope.launch {
+            repository.prefsRepo.setOpenNsitesExternally(enabled)
+            showBanner(
+                if (enabled) "Nsites will launch in External Custom Tab sheet"
+                else "Nsites will open in Built-in WebView Sandbox"
+            )
         }
     }
 
@@ -457,9 +517,40 @@ class ShellViewModel(
             runCatching { repository.refreshCatalogFromRelays() }
                 .onSuccess {
                     if (!silent) {
-                        showBanner("Syncing NIP-5D Napplets & NIP-5A Nsites from relays…")
+                        showBanner("Syncing NIP-5D Napplets, NIP-5A Nsites & NIP-51 lists…")
                     }
                 }
+        }
+    }
+
+    fun toggleNip51Bookmark(applet: InstalledAppletEntity) {
+        viewModelScope.launch {
+            runCatching { repository.toggleLocalNip51Bookmark(applet) }
+                .onSuccess { added ->
+                    showBanner(
+                        if (added) "Starred ${applet.title} in your NIP-51 gallery list"
+                        else "Removed ${applet.title} from NIP-51 list"
+                    )
+                }
+                .onFailure { err ->
+                    showBanner(err.message ?: "Could not update NIP-51 list", isError = true)
+                }
+        }
+    }
+
+    fun publishNip51CuratedList() {
+        viewModelScope.launch {
+            _isWorking.value = true
+            runCatching { repository.publishNip51CuratedList() }
+                .onSuccess { res ->
+                    showBanner(
+                        "Signed & published NIP-51 gallery list (Kind 30003) to ${res.acceptedCount}/${res.receipts.size} relays"
+                    )
+                }
+                .onFailure { err ->
+                    showBanner(err.message ?: "Failed to publish NIP-51 list", isError = true)
+                }
+            _isWorking.value = false
         }
     }
 

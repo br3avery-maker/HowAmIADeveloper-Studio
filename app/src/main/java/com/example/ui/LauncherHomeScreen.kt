@@ -88,6 +88,7 @@ import com.example.data.LauncherPrefs
 import com.example.data.LauncherViewMode
 import com.example.data.VaultAccountEntity
 import com.example.data.WallpaperStyle
+import com.example.nostr.ExternalSiteLauncher
 import com.example.nostr.NostrCrypto
 import com.example.ui.theme.BreBlack
 import com.example.ui.theme.BreDeepPink
@@ -114,6 +115,8 @@ fun LauncherHomeScreen(
     onToggleViewMode: () -> Unit,
     onOpenAccountDrawer: () -> Unit,
     onLaunchApplet: (InstalledAppletEntity) -> Unit,
+    onLaunchInApp: (InstalledAppletEntity) -> Unit = onLaunchApplet,
+    onLaunchExternal: ((InstalledAppletEntity) -> Unit)? = null,
     onForkApplet: (InstalledAppletEntity) -> Unit,
     onToggleNip07: (InstalledAppletEntity) -> Unit,
     onUnpinApplet: (InstalledAppletEntity) -> Unit,
@@ -195,6 +198,8 @@ fun LauncherHomeScreen(
                                             LauncherGridTile(
                                                 applet = applet,
                                                 onLaunch = { onLaunchApplet(applet) },
+                                                onLaunchInApp = { onLaunchInApp(applet) },
+                                                onLaunchExternal = onLaunchExternal?.let { fn -> { fn(applet) } },
                                                 onViewManifest = { inspectedManifestApplet = applet },
                                                 onOpenPermissions = onOpenAppletPermissions,
                                                 onFork = { onForkApplet(applet) },
@@ -214,9 +219,16 @@ fun LauncherHomeScreen(
                                             .testTag("launcher_description_list")
                                     ) {
                                         items(installedApplets, key = { it.appletId }) { applet ->
+                                            val opensExternally = launcherPrefs.openNsitesExternally &&
+                                                applet.isNsite &&
+                                                applet.inlineHtml.isBlank() &&
+                                                ExternalSiteLauncher.resolveExternalUrl(applet) != null
                                             LauncherDescriptionRow(
                                                 applet = applet,
+                                                opensExternally = opensExternally,
                                                 onLaunch = { onLaunchApplet(applet) },
+                                                onLaunchInApp = { onLaunchInApp(applet) },
+                                                onLaunchExternal = onLaunchExternal?.let { fn -> { fn(applet) } },
                                                 onViewManifest = { inspectedManifestApplet = applet },
                                                 onOpenPermissions = onOpenAppletPermissions,
                                                 onFork = { onForkApplet(applet) },
@@ -355,7 +367,10 @@ private fun ZineLauncherBannerStrip(
 }
 
 @Composable
-private fun LauncherWallpaperLayer(prefs: LauncherPrefs) {
+fun LauncherWallpaperLayer(
+    prefs: LauncherPrefs,
+    extraScrimBoost: Float = 0f
+) {
     Box(modifier = Modifier.fillMaxSize().background(BreBlack)) {
         when (prefs.wallpaperStyle) {
             WallpaperStyle.CYBER_ZINE -> {
@@ -465,7 +480,7 @@ private fun LauncherWallpaperLayer(prefs: LauncherPrefs) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(BreBlack.copy(alpha = prefs.scrimDimAlpha))
+                .background(BreBlack.copy(alpha = (prefs.scrimDimAlpha + extraScrimBoost).coerceIn(0.10f, 0.90f)))
         )
     }
 }
@@ -647,6 +662,8 @@ fun AccountAvatarThumbnail(
 private fun LauncherGridTile(
     applet: InstalledAppletEntity,
     onLaunch: () -> Unit,
+    onLaunchInApp: () -> Unit,
+    onLaunchExternal: (() -> Unit)?,
     onViewManifest: () -> Unit,
     onOpenPermissions: () -> Unit,
     onFork: () -> Unit,
@@ -706,6 +723,8 @@ private fun LauncherGridTile(
             expanded = menuExpanded,
             applet = applet,
             onDismiss = { menuExpanded = false },
+            onLaunchInApp = onLaunchInApp,
+            onLaunchExternal = onLaunchExternal,
             onViewManifest = onViewManifest,
             onOpenPermissions = onOpenPermissions,
             onFork = onFork,
@@ -718,7 +737,10 @@ private fun LauncherGridTile(
 @Composable
 private fun LauncherDescriptionRow(
     applet: InstalledAppletEntity,
+    opensExternally: Boolean,
     onLaunch: () -> Unit,
+    onLaunchInApp: () -> Unit,
+    onLaunchExternal: (() -> Unit)?,
     onViewManifest: () -> Unit,
     onOpenPermissions: () -> Unit,
     onFork: () -> Unit,
@@ -784,6 +806,8 @@ private fun LauncherDescriptionRow(
                         expanded = menuExpanded,
                         applet = applet,
                         onDismiss = { menuExpanded = false },
+                        onLaunchInApp = onLaunchInApp,
+                        onLaunchExternal = onLaunchExternal,
                         onViewManifest = onViewManifest,
                         onOpenPermissions = onOpenPermissions,
                         onFork = onFork,
@@ -811,7 +835,11 @@ private fun LauncherDescriptionRow(
                 color = BrePinkDark1
             ) {
                 Text(
-                    text = if (applet.isNsite) "Open Nsite →" else "Launch Napplet →",
+                    text = when {
+                        opensExternally -> "Open Nsite ↗"
+                        applet.isNsite -> "Open Nsite →"
+                        else -> "Launch Napplet →"
+                    },
                     style = MaterialTheme.typography.labelLarge,
                     color = BreWhite,
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp)
@@ -847,13 +875,33 @@ private fun AppletContextDropdown(
     expanded: Boolean,
     applet: InstalledAppletEntity,
     onDismiss: () -> Unit,
+    onLaunchInApp: () -> Unit,
+    onLaunchExternal: (() -> Unit)?,
     onViewManifest: () -> Unit,
     onOpenPermissions: () -> Unit,
     onFork: () -> Unit,
     onToggleNip07: () -> Unit,
     onUnpin: () -> Unit
 ) {
+    val hasExternalUrl = remember(applet) { ExternalSiteLauncher.resolveExternalUrl(applet) != null }
+
     DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+        if (hasExternalUrl && onLaunchExternal != null) {
+            DropdownMenuItem(
+                text = { Text("Open in Custom Tab Sheet ↗") },
+                onClick = {
+                    onDismiss()
+                    onLaunchExternal()
+                }
+            )
+        }
+        DropdownMenuItem(
+            text = { Text("Open in Built-in WebView Sandbox") },
+            onClick = {
+                onDismiss()
+                onLaunchInApp()
+            }
+        )
         DropdownMenuItem(
             text = { Text("View Manifest & SHA-256") },
             onClick = {

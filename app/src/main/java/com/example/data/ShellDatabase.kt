@@ -123,6 +123,25 @@ interface ShellDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAuditEntry(entry: SignerAuditEntity)
+
+    // NIP-51 Curated Bookmarks & Lists
+    @Query("SELECT * FROM curated_bookmarks ORDER BY createdAt DESC")
+    fun observeCuratedBookmarks(): Flow<List<CuratedBookmarkEntity>>
+
+    @Query("SELECT * FROM curated_bookmarks WHERE curatorPubkey = :curatorPubkey")
+    suspend fun getBookmarksByCurator(curatorPubkey: String): List<CuratedBookmarkEntity>
+
+    @Query("SELECT * FROM curated_bookmarks WHERE coordinate = :coordinate AND curatorPubkey = :curatorPubkey LIMIT 1")
+    suspend fun getBookmark(coordinate: String, curatorPubkey: String): CuratedBookmarkEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertCuratedBookmark(bookmark: CuratedBookmarkEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertCuratedBookmarks(bookmarks: List<CuratedBookmarkEntity>)
+
+    @Query("DELETE FROM curated_bookmarks WHERE coordinate = :coordinate AND curatorPubkey = :curatorPubkey")
+    suspend fun deleteCuratedBookmark(coordinate: String, curatorPubkey: String)
 }
 
 @Database(
@@ -133,9 +152,10 @@ interface ShellDao {
         InstalledAppletEntity::class,
         AppletStorageEntity::class,
         SignerPolicyEntity::class,
-        SignerAuditEntity::class
+        SignerAuditEntity::class,
+        CuratedBookmarkEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class ShellDatabase : RoomDatabase() {
@@ -145,13 +165,36 @@ abstract class ShellDatabase : RoomDatabase() {
         @Volatile
         private var INSTANCE: ShellDatabase? = null
 
+        private val MIGRATION_1_2 = object : androidx.room.migration.Migration(1, 2) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `curated_bookmarks` (
+                        `coordinate` TEXT NOT NULL,
+                        `curatorPubkey` TEXT NOT NULL,
+                        `curatorNpub` TEXT NOT NULL,
+                        `listSlug` TEXT NOT NULL,
+                        `listTitle` TEXT NOT NULL,
+                        `isLocalCurator` INTEGER NOT NULL,
+                        `createdAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`coordinate`, `curatorPubkey`)
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         fun getInstance(context: Context): ShellDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
                     context.applicationContext,
                     ShellDatabase::class.java,
                     "sovereign_shell.db"
-                ).fallbackToDestructiveMigration(true).build().also { INSTANCE = it }
+                )
+                    .addMigrations(MIGRATION_1_2)
+                    .fallbackToDestructiveMigration(true)
+                    .build()
+                    .also { INSTANCE = it }
             }
         }
     }

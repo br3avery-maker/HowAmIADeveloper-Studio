@@ -35,6 +35,7 @@ val CyberMint = BreLightPink
 val CyberMintContainer = BrePinkDark3
 
 val SignalAmber = ZineBoneCream
+val AmberSignal = SignalAmber
 val SignalAmberContainer = Color(0xFF2D251C)
 
 val CoralAlert = Color(0xFFFF4D6D)

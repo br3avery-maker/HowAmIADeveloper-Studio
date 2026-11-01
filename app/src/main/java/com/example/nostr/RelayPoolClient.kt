@@ -122,11 +122,23 @@ class RelayPoolClient(
                     put("kinds", JSONArray().put(NostrKinds.NSITE_ROOT))
                     put("limit", 35)
                 }
+                val filterNip51Lists = JSONObject().apply {
+                    put(
+                        "kinds",
+                        JSONArray()
+                            .put(NostrKinds.NIP51_BOOKMARK_SET)
+                            .put(NostrKinds.NIP51_CATEGORIZED_LIST)
+                    )
+                    put("limit", 40)
+                }
                 webSocket.send(
                     JSONArray().put("REQ").put("shell_nap_$suffix").put(filterNapplets).toString()
                 )
                 webSocket.send(
                     JSONArray().put("REQ").put("shell_nsite_$suffix").put(filterNamedNsites).put(filterRootNsites).toString()
+                )
+                webSocket.send(
+                    JSONArray().put("REQ").put("shell_nip51_$suffix").put(filterNip51Lists).toString()
                 )
                 webSocket.send(
                     JSONArray().put("REQ").put("shell_notes_$suffix").put(filterNotes).toString()
@@ -203,15 +215,69 @@ class RelayPoolClient(
             put("kinds", JSONArray().put(NostrKinds.NSITE_NAMED))
             put("limit", 60)
         }
+        val filterNip51 = JSONObject().apply {
+            put(
+                "kinds",
+                JSONArray()
+                    .put(NostrKinds.NIP51_BOOKMARK_SET)
+                    .put(NostrKinds.NIP51_CATEGORIZED_LIST)
+            )
+            put("limit", 40)
+        }
         val napMsg = JSONArray().put("REQ").put("disc_nap_$token").put(filterNapplets).toString()
         val nsiteMsg = JSONArray().put("REQ").put("disc_ns_$token").put(filterNamedNsites).toString()
+        val nip51Msg = JSONArray().put("REQ").put("disc_list_$token").put(filterNip51).toString()
         sockets.forEach { (url, ws) ->
             val st = _relayStatuses.value[url]?.status
             if (st == RelayConnectionStatus.CONNECTED) {
                 ws.send(napMsg)
                 ws.send(nsiteMsg)
+                ws.send(nip51Msg)
             } else if (st != RelayConnectionStatus.CONNECTING) {
                 connectRelay(url)
+            }
+        }
+    }
+
+    fun requestManifestsByCoordinates(coordinates: List<String>) {
+        if (coordinates.isEmpty()) return
+        val kinds = HashSet<Int>()
+        val authors = HashSet<String>()
+        val dTags = HashSet<String>()
+        for (coord in coordinates.take(25)) {
+            val parts = coord.split(':')
+            if (parts.size >= 2) {
+                val k = parts[0].toIntOrNull() ?: continue
+                val pk = parts[1].trim()
+                if (pk.length == 64) {
+                    kinds.add(k)
+                    authors.add(pk)
+                    if (parts.size >= 3 && parts[2].isNotBlank() && parts[2] != "root") {
+                        dTags.add(parts[2])
+                    }
+                }
+            }
+        }
+        if (kinds.isEmpty() || authors.isEmpty()) return
+        val subId = "disc_coord_${UUID.randomUUID().toString().take(6)}"
+        val filter = JSONObject().apply {
+            val kArr = JSONArray()
+            kinds.forEach { kArr.put(it) }
+            put("kinds", kArr)
+            val aArr = JSONArray()
+            authors.forEach { aArr.put(it) }
+            put("authors", aArr)
+            if (dTags.isNotEmpty()) {
+                val dArr = JSONArray()
+                dTags.forEach { dArr.put(it) }
+                put("#d", dArr)
+            }
+            put("limit", 40)
+        }
+        val reqMsg = JSONArray().put("REQ").put(subId).put(filter).toString()
+        sockets.forEach { (url, ws) ->
+            if (_relayStatuses.value[url]?.status == RelayConnectionStatus.CONNECTED) {
+                ws.send(reqMsg)
             }
         }
     }

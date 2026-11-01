@@ -1,6 +1,6 @@
 {
-  "summary":  "Implementation plan for NostrDeck, a self-publishing Android Nostr napplet & nsite launcher shell featuring a customizable home-screen launcher (icon grid / detailed list toggle + custom wallpaper), right-side Account Menu Drawer with multi-account nsec signer vault, full-page Napplets | Nsites discovery feed, sandboxed NIP-5D postMessage NAPs + optional per-applet NIP-07 runtime, in-app Creator Studio, Blossom BUD-02 uploader, and self-cloning web shell nsite publishing.",
-  "updatedAt":  "2026-11-01T07:29:07.019775188Z",
+  "summary":  "Implementation plan for upgrading SovereignShell's Discovery screen into a Home-screen-matched Curated Gallery & App Store with multi-signal clone/version stacking, an interactive Version Picker Bottom Sheet, NIP-51 curation lists + categories + featured picks, and an optional Live Relay Feed toggle.",
+  "updatedAt":  "2026-11-01T09:12:14.440683037Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

@@ -257,6 +257,79 @@ if (pkBtn) pkBtn.onclick = async () => {
             inlineHtml = templateDraftFor(GraphicTemplatePreset.PRETEND_ZINE).first,
             inlineCss = templateDraftFor(GraphicTemplatePreset.PRETEND_ZINE).second,
             inlineJs = DEFAULT_TEMPLATE_JS
+        ),
+        InstalledAppletEntity(
+            appletId = "35129:$hostPubkeyHex:pulse-notes-classic",
+            kind = NostrKinds.NAPPLET_NAMED,
+            authorPubkey = hostPubkeyHex,
+            authorNpub = hostNpub,
+            dTag = "pulse-notes-classic",
+            title = "PulseNotes v1",
+            description = "Compact minimalist edition of PulseNotes for rapid single-tap Kind 1 dispatches.",
+            iconGlyph = "⚡",
+            accentHex = "#CD0D72",
+            isNsite = false,
+            enableNip07 = false,
+            isInstalled = false,
+            pinOrder = 7,
+            updatedAt = System.currentTimeMillis() - 86_400_000L,
+            inlineHtml = PULSE_NOTES_HTML,
+            inlineCss = COMMON_APPLET_CSS,
+            inlineJs = PULSE_NOTES_JS
+        ),
+        InstalledAppletEntity(
+            appletId = "35129:$hostPubkeyHex:zap-calc",
+            kind = NostrKinds.NAPPLET_NAMED,
+            authorPubkey = hostPubkeyHex,
+            authorNpub = hostNpub,
+            dTag = "zap-calc",
+            title = "Sats & Hash Lab",
+            description = "Offline Nostr event commitment & sats split calculator with NAP-STORAGE presets.",
+            iconGlyph = "🧮",
+            accentHex = "#FF1493",
+            isNsite = false,
+            enableNip07 = false,
+            isInstalled = false,
+            pinOrder = 8,
+            inlineHtml = SATS_LAB_HTML,
+            inlineCss = COMMON_APPLET_CSS,
+            inlineJs = SATS_LAB_JS
+        ),
+        InstalledAppletEntity(
+            appletId = "35129:$hostPubkeyHex:nostr-polls",
+            kind = NostrKinds.NAPPLET_NAMED,
+            authorPubkey = hostPubkeyHex,
+            authorNpub = hostNpub,
+            dTag = "nostr-polls",
+            title = "Zine Polls",
+            description = "Publish signed Nostr community polls and tally live responses via NAP-SIGNER.",
+            iconGlyph = "📊",
+            accentHex = "#FFB6D9",
+            isNsite = false,
+            enableNip07 = false,
+            isInstalled = false,
+            pinOrder = 9,
+            inlineHtml = ZINE_POLLS_HTML,
+            inlineCss = COMMON_APPLET_CSS,
+            inlineJs = ZINE_POLLS_JS
+        ),
+        InstalledAppletEntity(
+            appletId = "35129:$hostPubkeyHex:pixel-synth",
+            kind = NostrKinds.NAPPLET_NAMED,
+            authorPubkey = hostPubkeyHex,
+            authorNpub = hostNpub,
+            dTag = "pixel-synth",
+            title = "Pixel Board",
+            description = "Create cyber-zine ASCII/pixel stamps and broadcast signed art notes to relays.",
+            iconGlyph = "🎨",
+            accentHex = "#FF1493",
+            isNsite = false,
+            enableNip07 = false,
+            isInstalled = false,
+            pinOrder = 10,
+            inlineHtml = PIXEL_BOARD_HTML,
+            inlineCss = COMMON_APPLET_CSS,
+            inlineJs = PIXEL_BOARD_JS
         )
     )
 
@@ -571,6 +644,82 @@ document.getElementById('scanBtn').onclick = () => {
     }
   });
   window.postMessage({ id, type: 'relay.query', filter: { kinds: [0, 1, 35128, 35129], limit: 12 } }, '*');
+};
+    """
+
+    private const val SATS_LAB_HTML = """
+<div class="card">
+  <div class="eyebrow">NIP-5D UTILITY • TOOLS</div>
+  <h2>🧮 Sats &amp; Split Lab</h2>
+  <p>Save value-4-value split presets into isolated <code>NAP-STORAGE</code>.</p>
+  <input id="satsInput" placeholder="Enter total sats (e.g. 21000)" value="21000" />
+  <button id="calcBtn">Compute 60 / 30 / 10 Split →</button>
+  <div id="calcOut" class="mono" style="margin-top:10px;">Ready.</div>
+</div>
+    """
+
+    private const val SATS_LAB_JS = """
+document.getElementById('calcBtn').onclick = () => {
+  const raw = parseInt(document.getElementById('satsInput').value || '21000', 10) || 21000;
+  const summary = 'Lead: ' + Math.round(raw*0.6) + ' • Relay: ' + Math.round(raw*0.3) + ' • Shell: ' + Math.round(raw*0.1) + ' sats';
+  document.getElementById('calcOut').textContent = summary;
+  window.postMessage({ id: 'sl_' + Date.now(), type: 'storage.set', key: 'last_split', value: summary }, '*');
+};
+    """
+
+    private const val ZINE_POLLS_HTML = """
+<div class="card">
+  <div class="eyebrow">SOCIAL • SIGNED POLLS</div>
+  <h2>📊 Zine Quick Poll</h2>
+  <p>Draft a two-option poll question and sign it via your Built-in Signer.</p>
+  <input id="pollQuestion" placeholder="Best Nostr app transport?" value="Favorite sovereign web stack?" />
+  <button id="publishPollBtn">Sign &amp; Broadcast Poll →</button>
+  <div id="pollOut" class="mono" style="margin-top:10px;"></div>
+</div>
+    """
+
+    private const val ZINE_POLLS_JS = """
+document.getElementById('publishPollBtn').onclick = () => {
+  const q = document.getElementById('pollQuestion').value || 'Favorite sovereign web stack?';
+  const id = 'poll_' + Date.now();
+  window.addEventListener('message', function h(ev) {
+    let d = ev.data; if (typeof d === 'string') { try { d = JSON.parse(d); } catch(e){ return; } }
+    if (d && d.id === id && d.reply) {
+      window.removeEventListener('message', h);
+      document.getElementById('pollOut').textContent = d.error ? ('Cancelled: ' + d.error) : ('Signed Poll Event: ' + d.result.id.slice(0,16) + '…');
+    }
+  });
+  window.postMessage({
+    id,
+    type: 'signer.signEvent',
+    event: { kind: 1, content: '📊 POLL: ' + q + '\n1) NIP-5D Napplets\n2) NIP-5A Nsites\n#nostr #poll', tags: [['t','poll']] }
+  }, '*');
+};
+    """
+
+    private const val PIXEL_BOARD_HTML = """
+<div class="card">
+  <div class="eyebrow">GAMES &amp; ART • ZINE STAMP</div>
+  <h2>🎨 Cyber-Zine Stamp Pad</h2>
+  <p>Compose an ASCII badge and sign it onto your Nostr timeline.</p>
+  <textarea id="artInput">[ ☆ SOVEREIGN ≠ SHELL ☆ ]</textarea>
+  <button id="stampArtBtn">Sign Art Note →</button>
+  <div id="artOut" class="mono" style="margin-top:10px;"></div>
+</div>
+    """
+
+    private const val PIXEL_BOARD_JS = """
+document.getElementById('stampArtBtn').onclick = () => {
+  const art = document.getElementById('artInput').value || '[ ☆ ]';
+  const id = 'art_' + Date.now();
+  window.addEventListener('message', function h(ev) {
+    let d = ev.data; if (typeof d === 'string') { try { d = JSON.parse(d); } catch(e){ return; } }
+    if (d && d.id === id && d.reply) {
+      window.removeEventListener('message', h);
+      document.getElementById('artOut').textContent = d.error ? ('Rejected: ' + d.error) : ('Signed Stamp: ' + d.result.id.slice(0,16) + '…');
+    }
+  });
+  window.postMessage({ id, type: 'signer.signEvent', event: { kind: 1, content: art + ' #zine #napplet', tags: [['t','art']] } }, '*');
 };
     """
 }

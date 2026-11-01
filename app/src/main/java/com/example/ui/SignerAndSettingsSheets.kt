@@ -27,7 +27,9 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AddPhotoAlternate
@@ -48,6 +50,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
@@ -478,6 +481,7 @@ fun WallpaperAndBlossomScreen(
     onSelectStyle: (WallpaperStyle) -> Unit,
     onUpdateScrim: (Float) -> Unit,
     onUpdateBlossomServer: (String) -> Unit,
+    onToggleExternalNsites: (Boolean) -> Unit = {},
     onBack: () -> Unit
 ) {
     BackHandler(onBack = onBack)
@@ -504,6 +508,7 @@ fun WallpaperAndBlossomScreen(
                 .fillMaxSize()
                 .widthIn(max = 640.dp)
                 .align(Alignment.TopCenter)
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp, vertical = 14.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -629,6 +634,50 @@ fun WallpaperAndBlossomScreen(
                     }
                 }
             }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Surface(
+                shape = RoundedCornerShape(20.dp),
+                color = ObsidianElevated,
+                border = BorderStroke(1.dp, ObsidianBorder),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp)
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                        Text(
+                            text = "NSITE LAUNCHER MODE",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = CyberMint
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Open Nsites in External Custom Tab",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = "Launches remote NIP-5A Nsites in an expandable Android Custom Tab sheet like standard Nostr shells. NIP-5D Napplets & 'In-App' actions use the built-in sandboxed WebView.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = prefs.openNsitesExternally,
+                        onCheckedChange = onToggleExternalNsites,
+                        modifier = Modifier.testTag("toggle_external_nsites_switch")
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
         }
     }
 }

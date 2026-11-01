@@ -34,12 +34,15 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.data.InstalledAppletEntity
+import com.example.nostr.ExternalSiteLauncher
 import com.example.ui.AccountMenuDrawerContent
 import com.example.ui.AppletRuntimeScreen
 import com.example.ui.CreatorStudioScreen
@@ -82,6 +85,8 @@ fun SovereignShellRoot(vm: ShellViewModel) {
     val launcherPrefs by vm.launcherPrefs.collectAsStateWithLifecycle()
     val installedApplets by vm.installedApplets.collectAsStateWithLifecycle()
     val catalogApplets by vm.catalogApplets.collectAsStateWithLifecycle()
+    val stackedGalleryGroups by vm.stackedGalleryGroups.collectAsStateWithLifecycle()
+    val localCuratedCount by vm.localCuratedCount.collectAsStateWithLifecycle()
     val spamShieldEnabled by vm.spamShieldEnabled.collectAsStateWithLifecycle()
     val blockedSpamCount by vm.blockedSpamCount.collectAsStateWithLifecycle()
     val relays by vm.managedRelays.collectAsStateWithLifecycle()
@@ -96,8 +101,32 @@ fun SovereignShellRoot(vm: ShellViewModel) {
     val auditLog by vm.auditLog.collectAsStateWithLifecycle()
     val banner by vm.banner.collectAsStateWithLifecycle()
 
+    val context = LocalContext.current
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+
+    val launchAppletSmart: (InstalledAppletEntity, Boolean) -> Unit = { app, forceInApp ->
+        val externalUrl = ExternalSiteLauncher.resolveExternalUrl(app)
+        val shouldOpenExternal = !forceInApp &&
+            app.isNsite &&
+            app.inlineHtml.isBlank() &&
+            launcherPrefs.openNsitesExternally &&
+            !externalUrl.isNullOrBlank()
+        if (shouldOpenExternal && ExternalSiteLauncher.launchCustomTabOrBrowser(context, externalUrl!!)) {
+            vm.showBanner("Opened ${app.title} in External Custom Tab")
+        } else {
+            vm.navigateTo(ShellDestination.RunningApplet(app.appletId))
+        }
+    }
+
+    val launchAppletExternalExplicit: (InstalledAppletEntity) -> Unit = { app ->
+        val externalUrl = ExternalSiteLauncher.resolveExternalUrl(app)
+        if (!externalUrl.isNullOrBlank() && ExternalSiteLauncher.launchCustomTabOrBrowser(context, externalUrl)) {
+            vm.showBanner("Opened ${app.title} in External Custom Tab")
+        } else {
+            vm.navigateTo(ShellDestination.RunningApplet(app.appletId))
+        }
+    }
 
     LaunchedEffect(banner?.id) {
         if (banner != null) {
@@ -146,7 +175,13 @@ fun SovereignShellRoot(vm: ShellViewModel) {
                                 onToggleViewMode = { vm.toggleLauncherViewMode() },
                                 onOpenAccountDrawer = { scope.launch { drawerState.open() } },
                                 onLaunchApplet = { app ->
-                                    vm.navigateTo(ShellDestination.RunningApplet(app.appletId))
+                                    launchAppletSmart(app, false)
+                                },
+                                onLaunchInApp = { app ->
+                                    launchAppletSmart(app, true)
+                                },
+                                onLaunchExternal = { app ->
+                                    launchAppletExternalExplicit(app)
                                 },
                                 onForkApplet = { app ->
                                     vm.navigateTo(ShellDestination.CreatorStudio(forkSource = app))
@@ -163,15 +198,25 @@ fun SovereignShellRoot(vm: ShellViewModel) {
                         is ShellDestination.DiscoveryFeed -> {
                             DiscoveryFeedScreen(
                                 initialTabIsNsites = dest.initialTabIsNsites,
+                                launcherPrefs = launcherPrefs,
+                                stackedGroups = stackedGalleryGroups,
                                 catalogApplets = catalogApplets,
+                                localCuratedCount = localCuratedCount,
                                 spamShieldEnabled = spamShieldEnabled,
                                 blockedSpamCount = blockedSpamCount,
                                 connectedRelays = connectedRelayCount,
+                                onToggleViewMode = { vm.toggleLauncherViewMode() },
+                                onToggleDiscoveryMode = { vm.toggleDiscoveryDisplayMode() },
                                 onToggleSpamShield = { vm.toggleSpamShield() },
                                 onRefreshCatalog = { silent -> vm.refreshDiscoveryCatalog(silent) },
+                                onToggleNip51Star = { app -> vm.toggleNip51Bookmark(app) },
+                                onPublishNip51List = { vm.publishNip51CuratedList() },
                                 onInstallToggle = { app, install -> vm.setAppletInstalled(app, install) },
                                 onOpenApplet = { app ->
-                                    vm.navigateTo(ShellDestination.RunningApplet(app.appletId))
+                                    launchAppletSmart(app, false)
+                                },
+                                onOpenAppletInApp = { app ->
+                                    launchAppletSmart(app, true)
                                 },
                                 onForkToStudio = { app ->
                                     vm.navigateTo(ShellDestination.CreatorStudio(forkSource = app))
@@ -276,6 +321,7 @@ fun SovereignShellRoot(vm: ShellViewModel) {
                                 onSelectStyle = { vm.selectPresetWallpaper(it) },
                                 onUpdateScrim = { vm.updateWallpaperScrim(it) },
                                 onUpdateBlossomServer = { vm.updateBlossomServer(it) },
+                                onToggleExternalNsites = { vm.setOpenNsitesExternally(it) },
                                 onBack = { vm.navigateBack() }
                             )
                         }
@@ -287,6 +333,9 @@ fun SovereignShellRoot(vm: ShellViewModel) {
                                     applet = runningApplet,
                                     activeAccount = activeAccount,
                                     resolveDocument = { vm.repository.resolveAppletDocument(it) },
+                                    resolveAsset = { app, path, isMain, tx ->
+                                        vm.repository.resolveAppletAsset(app, path, isMain, tx)
+                                    },
                                     onBridgeCall = { app, proto, type, payload ->
                                         vm.handleAppletBridgeCall(app, proto, type, payload)
                                     },

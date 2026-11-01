@@ -8,15 +8,22 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
+import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 class BlossomClient(
+    private val cacheDir: File? = null,
     private val okHttpClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(12, TimeUnit.SECONDS)
+        .connectTimeout(10, TimeUnit.SECONDS)
         .writeTimeout(20, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
         .build()
 ) {
+    private val memoryBlobCache = ConcurrentHashMap<String, ByteArray>()
+
     data class BlobUploadResult(
         val sha256: String,
         val url: String,
@@ -33,7 +40,9 @@ class BlossomClient(
         privKeyHex: String
     ): BlobUploadResult = withContext(Dispatchers.IO) {
         val cleanServer = serverUrl.trim().trimEnd('/')
-        val sha256 = NostrCrypto.sha256Hex(bytes)
+        val sha256 = NostrCrypto.sha256Hex(bytes).lowercase()
+        cacheVerifiedBytes(sha256, bytes)
+
         val nowSec = System.currentTimeMillis() / 1000L
         val expirationSec = (nowSec + 600L).toString()
 
@@ -104,48 +113,138 @@ class BlossomClient(
         }
     }
 
-    suspend fun fetchBlobText(servers: List<String>, sha256: String, directUrl: String = ""): String? =
-        withContext(Dispatchers.IO) {
-            if (directUrl.startsWith("https://", ignoreCase = true) || directUrl.startsWith("http://", ignoreCase = true)) {
-                val direct = runCatching {
-                    val req = Request.Builder().url(directUrl).get().build()
-                    okHttpClient.newCall(req).execute().use { resp ->
-                        if (resp.isSuccessful) resp.body?.string() else null
-                    }
-                }.getOrNull()
-                if (!direct.isNullOrBlank()) return@withContext direct
-            }
-            if (sha256.isBlank()) return@withContext null
+    suspend fun fetchBlobBytes(
+        servers: List<String>,
+        sha256: String,
+        extensionHint: String = "",
+        directUrl: String = ""
+    ): ByteArray? = withContext(Dispatchers.IO) {
+        val normalizedSha = sha256.trim().lowercase()
+        if (normalizedSha.length == 64) {
+            readCachedBytes(normalizedSha)?.let { return@withContext it }
+        }
 
-            val allServers = (servers + DEFAULT_BLOSSOM_SERVERS)
-                .map { it.trim().trimEnd('/') }
-                .filter { it.startsWith("https://") || it.startsWith("http://") }
-                .distinct()
-            for (srv in allServers) {
-                for (suffix in listOf("", ".html")) {
-                    val candidate = runCatching {
-                        val req = Request.Builder().url("$srv/$sha256$suffix").get().build()
-                        okHttpClient.newCall(req).execute().use { resp ->
-                            if (resp.isSuccessful) {
-                                val bytes = resp.body?.bytes() ?: return@use null
-                                if (NostrCrypto.sha256Hex(bytes).equals(sha256, ignoreCase = true)) {
-                                    String(bytes, Charsets.UTF_8)
-                                } else null
-                            } else null
-                        }
-                    }.getOrNull()
-                    if (candidate != null) return@withContext candidate
+        if (directUrl.startsWith("https://", ignoreCase = true) || directUrl.startsWith("http://", ignoreCase = true)) {
+            val directBytes = fetchRawUrlBytes(directUrl)
+            if (directBytes != null && directBytes.isNotEmpty()) {
+                if (normalizedSha.length != 64 || NostrCrypto.sha256Hex(directBytes).equals(normalizedSha, ignoreCase = true)) {
+                    if (normalizedSha.length == 64) cacheVerifiedBytes(normalizedSha, directBytes)
+                    return@withContext directBytes
                 }
             }
-            null
         }
+
+        if (normalizedSha.length != 64) return@withContext null
+
+        val cleanExt = extensionHint.trim().trimStart('.').lowercase()
+        val suffixes = buildList {
+            add("")
+            if (cleanExt.isNotBlank()) add(".$cleanExt")
+            if (cleanExt != "html" && cleanExt.isBlank()) add(".html")
+        }.distinct()
+
+        val allServers = (servers + DEFAULT_BLOSSOM_SERVERS)
+            .map { it.trim().trimEnd('/') }
+            .filter { it.startsWith("https://", ignoreCase = true) || it.startsWith("http://", ignoreCase = true) }
+            .distinct()
+
+        for (srv in allServers) {
+            for (suffix in suffixes) {
+                val candidate = runCatching {
+                    val req = Request.Builder()
+                        .url("$srv/$normalizedSha$suffix")
+                        .header("Accept", "*/*")
+                        .get()
+                        .build()
+                    okHttpClient.newCall(req).execute().use { resp ->
+                        if (!resp.isSuccessful) return@use null
+                        val bytes = resp.body?.bytes() ?: return@use null
+                        if (NostrCrypto.sha256Hex(bytes).equals(normalizedSha, ignoreCase = true)) {
+                            bytes
+                        } else {
+                            null
+                        }
+                    }
+                }.getOrNull()
+
+                if (candidate != null) {
+                    cacheVerifiedBytes(normalizedSha, candidate)
+                    return@withContext candidate
+                }
+            }
+        }
+        null
+    }
+
+    suspend fun fetchRawUrlBytes(url: String): ByteArray? = withContext(Dispatchers.IO) {
+        runCatching {
+            val req = Request.Builder().url(url).get().build()
+            okHttpClient.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) resp.body?.bytes() else null
+            }
+        }.getOrNull()
+    }
+
+    suspend fun fetchBlobText(
+        servers: List<String>,
+        sha256: String,
+        extensionHint: String = "html",
+        directUrl: String = ""
+    ): String? {
+        val bytes = fetchBlobBytes(
+            servers = servers,
+            sha256 = sha256,
+            extensionHint = extensionHint,
+            directUrl = directUrl
+        ) ?: return null
+        return String(bytes, Charsets.UTF_8)
+    }
+
+    private fun readCachedBytes(sha256: String): ByteArray? {
+        memoryBlobCache[sha256]?.let { return it }
+        val dir = cacheDir ?: return null
+        val file = File(dir, sha256)
+        if (!file.exists()) return null
+        return runCatching {
+            val bytes = file.readBytes()
+            if (NostrCrypto.sha256Hex(bytes).equals(sha256, ignoreCase = true)) {
+                if (memoryBlobCache.size < 96 && bytes.size <= 2_097_152) {
+                    memoryBlobCache[sha256] = bytes
+                }
+                bytes
+            } else {
+                file.delete()
+                null
+            }
+        }.getOrNull()
+    }
+
+    private fun cacheVerifiedBytes(sha256: String, bytes: ByteArray) {
+        if (bytes.size <= 2_097_152) {
+            if (memoryBlobCache.size >= 96) {
+                memoryBlobCache.keys.firstOrNull()?.let { memoryBlobCache.remove(it) }
+            }
+            memoryBlobCache[sha256] = bytes
+        }
+        val dir = cacheDir ?: return
+        runCatching {
+            dir.mkdirs()
+            val target = File(dir, sha256)
+            if (!target.exists()) {
+                target.writeBytes(bytes)
+            }
+        }
+    }
 
     companion object {
         val DEFAULT_BLOSSOM_SERVERS = listOf(
             "https://blossom.primal.net",
-            "https://nostr.download",
             "https://cdn.satellite.earth",
-            "https://blossom.band"
+            "https://nostr.download",
+            "https://blossom.band",
+            "https://cdn.hzrd149.com",
+            "https://blossom.oxtr.dev",
+            "https://nostrcheck.me"
         )
     }
 }

@@ -8,9 +8,14 @@ object NostrKinds {
     const val TEXT_NOTE = 1
     const val NAPPLET_SNAPSHOT = 5129
     const val RELAY_LIST = 10002
+    const val NIP51_BOOKMARKS = 10003
+    const val USER_BLOSSOM_SERVERS = 10063
     const val NSITE_ROOT = 15128
     const val NAPPLET_ROOT = 15129
     const val BLOSSOM_AUTH = 24242
+    const val NIP51_CATEGORIZED_LIST = 30001
+    const val NIP51_BOOKMARK_SET = 30003
+    const val NSITE_LEGACY_FILE = 34128
     const val NSITE_NAMED = 35128
     const val NAPPLET_NAMED = 35129
 }
