@@ -7,7 +7,6 @@ enum class GalleryCategory(val label: String, val glyph: String) {
     ALL("All", "✦"),
     FEATURED("Featured", "☆"),
     NIP51_CURATED("NIP-51 Lists", "🔖"),
-    NAPPLETS("Napplets", "🧩"),
     NSITES("Nsites", "🌐"),
     SOCIAL("Social", "💬"),
     TOOLS("Tools", "⚡"),
@@ -251,7 +250,7 @@ object CatalogStacker {
     ): Set<GalleryCategory> {
         val out = LinkedHashSet<GalleryCategory>()
         out.add(GalleryCategory.ALL)
-        out.add(if (primary.isNsite) GalleryCategory.NSITES else GalleryCategory.NAPPLETS)
+        out.add(GalleryCategory.NSITES)
         if (isFeatured) out.add(GalleryCategory.FEATURED)
         if (isCuratedNip51) out.add(GalleryCategory.NIP51_CURATED)
 

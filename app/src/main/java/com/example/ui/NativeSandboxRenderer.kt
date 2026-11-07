@@ -9,11 +9,13 @@ import android.view.ViewGroup
 import android.webkit.JavascriptInterface
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -35,6 +37,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.CallSplit
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.ContentCopy
@@ -62,6 +65,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -94,24 +98,22 @@ import java.io.ByteArrayInputStream
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Tracks whether the host environment (e.g. an unprivileged cloud container without isolatedProcess
- * support) killed Chromium's sandboxed WebView child process, preventing crash loops while allowing
- * manual retry at any time.
+ * Tracks whether the host environment forcibly terminated Chromium's sandboxed WebView child
+ * process (`onRenderProcessGone`), preventing crash loops while allowing manual retry at any time.
  */
 private val containerBlockedChromiumRenderer = AtomicBoolean(false)
 
 /**
- * Real HTML5 / CSS3 / ES-Module / Canvas Sandboxed WebView Engine for NIP-5D Napplets & NIP-5A Nsites.
+ * Real HTML5 / CSS3 / ES-Module / Canvas / WASM WebView Engine for NIP-5A Nsites & Studio Previews.
  *
- * - Serves each applet from a deterministic isolated HTTPS virtual origin (`https://app-<hash>.nsite.local/`)
+ * - Serves each site from a deterministic HTTPS virtual origin (`https://app-<hash>.nsite.local/`)
  *   so `window.localStorage`, `indexedDB`, `crypto.subtle`, ES modules (`<script type="module">`),
- *   2D `<canvas>`, CSS Grid/Flexbox, and multi-directional pointer/touch dragging work natively.
- * - Intercepts subresource paths (`/index.html`, `/assets/bundle.js`, `/assets/bundle.css`, images, WASM, fonts)
- *   via `shouldInterceptRequest`, resolving SHA-256 verified blobs from Blossom servers.
- * - Wires real `@JavascriptInterface` execution for both NIP-5D `window.postMessage` NAPs and
- *   optional NIP-07 `window.nostr` calls through the Built-in Signer & Relay Pool.
- * - Overrides `onRenderProcessGone` returning `true` so container renderer exits never crash the app,
- *   presenting an honest diagnostic panel rather than a synthetic/scraped UI.
+ *   HTML5 `<canvas>` / WebGL, CSS Grid/Flexbox, relative paths, and multi-page navigation work natively.
+ * - Intercepts subresource paths (`/index.html`, `/css/...`, `/js/...`, images, WASM, fonts)
+ *   via `shouldInterceptRequest`, resolving SHA-256 verified blobs from Blossom servers or local project files.
+ * - Exposes optional user-gated `window.nostr` (NIP-07) signing without ever exposing private keys to JS.
+ * - Overrides `onRenderProcessGone` returning `true` so renderer crashes never terminate the app and
+ *   never substitute fake or scraped card approximations.
  */
 @SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
 @Composable
@@ -119,12 +121,13 @@ internal fun SandboxedAppletSurface(
     applet: InstalledAppletEntity,
     rawHtml: String,
     assembledWebDoc: String?,
+    entryPath: String = "/index.html",
     reloadKey: Int = 0,
     resolveAsset: (suspend (String, Boolean) -> ResolvedWebAsset?)? = null,
     onBridgeCall: suspend (InstalledAppletEntity, String, String, JSONObject) -> Any?,
+    onForkSite: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
-    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val currentApplet by rememberUpdatedState(applet)
     val currentAssembledDoc by rememberUpdatedState(assembledWebDoc)
@@ -134,18 +137,38 @@ internal fun SandboxedAppletSurface(
 
     var rendererGone by remember { mutableStateOf(containerBlockedChromiumRenderer.get()) }
     var webViewRetryNonce by remember { mutableIntStateOf(0) }
-    var isLoadingPage by remember(applet.appletId, reloadKey, webViewRetryNonce) { mutableStateOf(true) }
+    var isLoadingPage by remember(applet.appletId, entryPath, reloadKey, webViewRetryNonce) { mutableStateOf(true) }
+    var mainFrameError by remember(applet.appletId, entryPath, reloadKey, webViewRetryNonce) { mutableStateOf<String?>(null) }
+    var canGoBackInSite by remember { mutableStateOf(false) }
 
     val virtualHost = remember(applet.appletId) {
         "app-${NostrCrypto.sha256Hex(applet.appletId).take(20)}.nsite.local"
     }
-    val entryUrl = remember(virtualHost) { "https://$virtualHost/index.html" }
+    val cleanEntry = remember(entryPath) {
+        "/" + entryPath.trim().trimStart('/').ifBlank { "index.html" }
+    }
+    val entryUrl = remember(virtualHost, cleanEntry) { "https://$virtualHost$cleanEntry" }
+
+    var activeWebView by remember { mutableStateOf<WebView?>(null) }
+
+    // Preserve multi-page / SPA history navigation inside running Nsites
+    BackHandler(enabled = canGoBackInSite && !rendererGone) {
+        activeWebView?.let { wv ->
+            if (wv.canGoBack()) {
+                wv.goBack()
+                canGoBackInSite = wv.canGoBack()
+            } else {
+                canGoBackInSite = false
+            }
+        }
+    }
 
     if (rendererGone) {
         ContainerWebViewDiagnosticFallback(
             applet = applet,
             rawHtml = rawHtml.ifBlank { assembledWebDoc.orEmpty() },
             onBridgeCall = onBridgeCall,
+            onForkSite = onForkSite,
             onRetryWebView = {
                 containerBlockedChromiumRenderer.set(false)
                 rendererGone = false
@@ -156,9 +179,7 @@ internal fun SandboxedAppletSurface(
         return
     }
 
-    var activeWebView by remember { mutableStateOf<WebView?>(null) }
-
-    DisposableEffect(applet.appletId, applet.enableNip07, reloadKey, webViewRetryNonce) {
+    DisposableEffect(applet.appletId, applet.enableNip07, cleanEntry, reloadKey, webViewRetryNonce) {
         onDispose {
             activeWebView?.let { wv ->
                 runCatching {
@@ -177,7 +198,7 @@ internal fun SandboxedAppletSurface(
             .fillMaxSize()
             .background(BreBlack)
     ) {
-        androidx.compose.runtime.key(applet.appletId, applet.enableNip07, reloadKey, webViewRetryNonce) {
+        androidx.compose.runtime.key(applet.appletId, applet.enableNip07, cleanEntry, reloadKey, webViewRetryNonce) {
             AndroidView(
                 modifier = Modifier.fillMaxSize(),
                 factory = { ctx ->
@@ -187,14 +208,9 @@ internal fun SandboxedAppletSurface(
                             ViewGroup.LayoutParams.MATCH_PARENT
                         )
                         setBackgroundColor(AndroidColor.BLACK)
-                        // Software layer prevents virtualized GPU driver crashes in cloud/emulator containers
-                        // while rendering full CSS3, DOM, SVG, and 2D HTML5 Canvas cleanly.
-                        setLayerType(View.LAYER_TYPE_SOFTWARE, null)
                         overScrollMode = View.OVER_SCROLL_NEVER
-                        isVerticalScrollBarEnabled = false
-                        isHorizontalScrollBarEnabled = false
 
-                        // Prevent parent Compose containers / drawers from stealing diagonal or horizontal drag gestures
+                        // Prevent parent Compose containers / drawers from stealing swipe gestures (e.g. 2048 Link)
                         setOnTouchListener { v, event ->
                             when (event.actionMasked) {
                                 MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> {
@@ -214,12 +230,12 @@ internal fun SandboxedAppletSurface(
                             mediaPlaybackRequiresUserGesture = false
                             useWideViewPort = true
                             loadWithOverviewMode = true
-                            setSupportZoom(false)
-                            builtInZoomControls = false
+                            setSupportZoom(true)
+                            builtInZoomControls = true
                             displayZoomControls = false
                             allowFileAccess = false
                             allowContentAccess = false
-                            mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                            mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
                         }
 
                         val jsBridge = SovereignHostJsBridge(
@@ -236,10 +252,31 @@ internal fun SandboxedAppletSurface(
                         webViewClient = object : WebViewClient() {
                             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                                 isLoadingPage = true
+                                mainFrameError = null
+                                canGoBackInSite = view?.canGoBack() == true
                             }
 
                             override fun onPageFinished(view: WebView?, url: String?) {
                                 isLoadingPage = false
+                                canGoBackInSite = view?.canGoBack() == true
+                            }
+
+                            override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                                super.doUpdateVisitedHistory(view, url, isReload)
+                                canGoBackInSite = view?.canGoBack() == true
+                            }
+
+                            override fun onReceivedError(
+                                view: WebView?,
+                                request: WebResourceRequest?,
+                                error: WebResourceError?
+                            ) {
+                                super.onReceivedError(view, request, error)
+                                if (request?.isForMainFrame == true) {
+                                    isLoadingPage = false
+                                    mainFrameError = error?.description?.toString()
+                                        ?: "Network error while loading ${request.url}"
+                                }
                             }
 
                             override fun shouldInterceptRequest(
@@ -262,7 +299,7 @@ internal fun SandboxedAppletSurface(
                                         )
                                     }
 
-                                    val path = uri.encodedPath?.ifBlank { "/index.html" } ?: "/index.html"
+                                    val path = uri.encodedPath?.ifBlank { cleanEntry } ?: cleanEntry
                                     val resolver = currentResolveAsset
                                     if (resolver != null) {
                                         val asset = runCatching {
@@ -283,21 +320,22 @@ internal fun SandboxedAppletSurface(
                                         }
                                     }
 
-                                    // Fallback for Studio Live Preview or inline-only bundles without repository resolver
-                                    if (path == "/" || path.equals("/index.html", ignoreCase = true)) {
-                                        val doc = currentAssembledDoc
-                                            ?: injectRuntimeBootstrap(
-                                                currentRawHtml,
-                                                enableNip07 = currentApplet.enableNip07
+                                    // Fallback for inline-only bundles when no external resolver matched
+                                    if (path == "/" || path.equals(cleanEntry, ignoreCase = true) || path.equals("/index.html", ignoreCase = true)) {
+                                        val fallbackDoc = currentAssembledDoc
+                                            ?: currentRawHtml.takeIf { it.isNotBlank() }?.let {
+                                                injectRuntimeBootstrap(it, enableNip07 = currentApplet.enableNip07)
+                                            }
+                                        if (!fallbackDoc.isNullOrBlank()) {
+                                            return WebResourceResponse(
+                                                "text/html",
+                                                "utf-8",
+                                                200,
+                                                "OK",
+                                                CORS_HEADERS,
+                                                ByteArrayInputStream(fallbackDoc.toByteArray(Charsets.UTF_8))
                                             )
-                                        return WebResourceResponse(
-                                            "text/html",
-                                            "utf-8",
-                                            200,
-                                            "OK",
-                                            CORS_HEADERS,
-                                            ByteArrayInputStream(doc.toByteArray(Charsets.UTF_8))
-                                        )
+                                        }
                                     }
                                     if (path.equals("/style.css", ignoreCase = true) && currentApplet.inlineCss.isNotBlank()) {
                                         return WebResourceResponse(
@@ -326,26 +364,8 @@ internal fun SandboxedAppletSurface(
                                         404,
                                         "Not Found",
                                         CORS_HEADERS,
-                                        ByteArrayInputStream("Asset not found: $path".toByteArray(Charsets.UTF_8))
+                                        ByteArrayInputStream("Asset not found in NIP-5A manifest: $path".toByteArray(Charsets.UTF_8))
                                     )
-                                }
-
-                                // Enforce strict NIP-5D network isolation when NIP-07 / clearnet mode is off for Napplets
-                                val appSnap = currentApplet
-                                if (!appSnap.isNsite && !appSnap.enableNip07) {
-                                    val pathSegment = uri.lastPathSegment.orEmpty().substringBefore('.')
-                                    val isContentAddressedBlob = pathSegment.length == 64 &&
-                                        pathSegment.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }
-                                    if (!isContentAddressedBlob) {
-                                        return WebResourceResponse(
-                                            "text/plain",
-                                            "utf-8",
-                                            403,
-                                            "Blocked by NIP-5D Isolation",
-                                            CORS_HEADERS,
-                                            ByteArrayInputStream(ByteArray(0))
-                                        )
-                                    }
                                 }
 
                                 return null
@@ -365,7 +385,7 @@ internal fun SandboxedAppletSurface(
                                 activeWebView = null
                                 isLoadingPage = false
                                 rendererGone = true
-                                // Returning true prevents Android's AwBrowserTerminator from killing the host process
+                                // Returning true prevents Android's AwBrowserTerminator from crashing SovereignShell
                                 return true
                             }
                         }
@@ -376,7 +396,6 @@ internal fun SandboxedAppletSurface(
                 },
                 update = { wv ->
                     activeWebView = wv
-                    // Live-update Studio preview drafts when assembledWebDoc changes while editing
                     if (currentApplet.appletId.startsWith("studio:preview:") && currentAssembledDoc != null) {
                         val tag = currentAssembledDoc.hashCode()
                         if (wv.tag != tag) {
@@ -386,6 +405,48 @@ internal fun SandboxedAppletSurface(
                     }
                 }
             )
+        }
+
+        if (mainFrameError != null && !isLoadingPage) {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = BreGray850,
+                border = BorderStroke(1.dp, CoralAlert),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(16.dp)
+                    .fillMaxWidth()
+                    .widthIn(max = 560.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier.padding(14.dp)
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "WebView Load Error",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = CoralAlert
+                        )
+                        Text(
+                            text = mainFrameError.orEmpty(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = BreGray100
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Button(
+                        onClick = {
+                            mainFrameError = null
+                            webViewRetryNonce++
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = BreDeepPink)
+                    ) {
+                        Text("Retry", color = BreWhite)
+                    }
+                }
+            }
         }
 
         if (isLoadingPage) {
@@ -403,10 +464,10 @@ internal fun SandboxedAppletSurface(
                     )
                     Spacer(modifier = Modifier.height(10.dp))
                     Text(
-                        text = if (applet.inlineHtml.isNotBlank()) {
-                            "Booting WebView sandbox…"
+                        text = if (applet.appletId.startsWith("studio:preview:")) {
+                            "Rendering multi-file Nsite preview…"
                         } else {
-                            "Verifying Blossom SHA-256 bundle…"
+                            "Verifying NIP-5A Blossom SHA-256 assets…"
                         },
                         style = MaterialTheme.typography.labelMedium,
                         color = BreLightPink
@@ -464,15 +525,16 @@ internal fun toJsLiteral(value: Any?): String = when (value) {
 }
 
 /**
- * Transparent diagnostic view shown ONLY if the host container OS forcibly terminates Android's
- * sandboxed Chromium WebView child process (`onRenderProcessGone`). Never scrapes or fakes the app's UI.
+ * Honest diagnostic panel shown ONLY if Android's sandboxed Chromium WebView process terminates
+ * (`onRenderProcessGone`). Never scrapes HTML text or substitutes fake interfaces.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun ContainerWebViewDiagnosticFallback(
+internal fun ContainerWebViewDiagnosticFallback(
     applet: InstalledAppletEntity,
     rawHtml: String,
     onBridgeCall: suspend (InstalledAppletEntity, String, String, JSONObject) -> Any?,
+    onForkSite: (() -> Unit)? = null,
     onRetryWebView: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -509,7 +571,8 @@ private fun ContainerWebViewDiagnosticFallback(
             .fillMaxSize()
             .background(BreBlack)
             .verticalScroll(rememberScrollState())
-            .padding(18.dp),
+            .padding(18.dp)
+            .testTag("renderer_diagnostic_fallback"),
         verticalArrangement = Arrangement.spacedBy(14.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -531,16 +594,16 @@ private fun ContainerWebViewDiagnosticFallback(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "Android WebView Renderer Blocked by Cloud Container",
+                        text = "WebView Renderer Process Exited",
                         style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
                         color = BreWhite
                     )
                 }
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "This streaming preview container terminated Android's sandboxed Chromium WebView process (code -1). " +
-                        "The real Nostr manifest and Blossom bundle for \"${applet.title}\" were fetched and verified, " +
-                        "and full HTML/CSS/JS WebView execution runs natively on physical Android devices (APK export).",
+                    text = "Android's Chromium WebView renderer process exited while hosting \"${applet.title}\". " +
+                        "SovereignShell isolated the crash without faking or scraping the website UI. " +
+                        "Retry the WebView, launch in your external browser, or fork the verified Blossom files in Studio.",
                     style = MaterialTheme.typography.bodySmall,
                     color = BreGray100
                 )
@@ -551,7 +614,8 @@ private fun ContainerWebViewDiagnosticFallback(
                 ) {
                     Button(
                         onClick = onRetryWebView,
-                        colors = ButtonDefaults.buttonColors(containerColor = BreDeepPink)
+                        colors = ButtonDefaults.buttonColors(containerColor = BreDeepPink),
+                        modifier = Modifier.testTag("diagnostic_retry_webview_button")
                     ) {
                         Icon(
                             imageVector = Icons.Default.Refresh,
@@ -559,7 +623,24 @@ private fun ContainerWebViewDiagnosticFallback(
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Retry Real WebView", color = BreWhite)
+                        Text("Retry WebView", color = BreWhite)
+                    }
+
+                    if (onForkSite != null) {
+                        OutlinedButton(
+                            onClick = onForkSite,
+                            border = BorderStroke(1.dp, BreDeepPink),
+                            modifier = Modifier.testTag("diagnostic_fork_site_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.CallSplit,
+                                contentDescription = null,
+                                tint = BreLightPink,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Fork in Studio", color = BreLightPink)
+                        }
                     }
 
                     if (gatewayUrl.isNotBlank()) {
@@ -576,13 +657,13 @@ private fun ContainerWebViewDiagnosticFallback(
                                 modifier = Modifier.size(16.dp)
                             )
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("Open Live URL", color = CyberMint)
+                            Text("Open in Browser", color = CyberMint)
                         }
 
                         OutlinedButton(
                             onClick = {
                                 clipboard.setText(AnnotatedString(gatewayUrl))
-                                bridgeTestOutput = "Copied live URL: $gatewayUrl"
+                                bridgeTestOutput = "Copied URL: $gatewayUrl"
                             },
                             border = BorderStroke(1.dp, BrePinkDark2)
                         ) {
@@ -592,14 +673,13 @@ private fun ContainerWebViewDiagnosticFallback(
                                 modifier = Modifier.size(15.dp)
                             )
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("Copy Gateway URL")
+                            Text("Copy URL")
                         }
                     }
                 }
             }
         }
 
-        // Verified Blossom Manifest & Downloaded Bundle Metadata
         Surface(
             shape = RoundedCornerShape(18.dp),
             color = BreGray850,
@@ -613,7 +693,7 @@ private fun ContainerWebViewDiagnosticFallback(
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 Text(
-                    text = "VERIFIED NOSTR MANIFEST & BLOSSOM BUNDLE",
+                    text = "VERIFIED NIP-5A MANIFEST & BLOSSOM ASSETS",
                     style = MaterialTheme.typography.labelSmall,
                     color = ZineBoneCream
                 )
@@ -632,7 +712,7 @@ private fun ContainerWebViewDiagnosticFallback(
                     )
                 }
                 Text(
-                    text = "Blossom Server: ${applet.blossomServer} • Downloaded HTML: ${rawHtml.length} chars",
+                    text = "Blossom Server: ${applet.blossomServer} • Entry HTML: ${rawHtml.length} chars",
                     fontFamily = JetBrainsMonoFontFamily,
                     fontSize = 11.sp,
                     color = BreGray100
@@ -641,7 +721,7 @@ private fun ContainerWebViewDiagnosticFallback(
                 if (manifestRoutes.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "Mapped Bundle Assets (${manifestRoutes.size} files):",
+                        text = "Mapped NIP-5A Paths (${manifestRoutes.size} files):",
                         style = MaterialTheme.typography.labelSmall,
                         color = BreWhite
                     )
@@ -670,23 +750,24 @@ private fun ContainerWebViewDiagnosticFallback(
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text(if (showRawSource) "Hide Downloaded HTML" else "View Downloaded HTML (${rawHtml.length} B)")
+                        Text(if (showRawSource) "Hide Entry HTML" else "Inspect Entry HTML (${rawHtml.length} B)")
                     }
 
-                    OutlinedButton(
-                        onClick = {
-                            scope.launch {
-                                val proto = if (applet.enableNip07) "NIP-07 window.nostr" else "NIP-5D NAP"
-                                runCatching {
-                                    val pk = onBridgeCall(applet, proto, "signer.getPublicKey", JSONObject())
-                                    "Host Signer Bridge OK — Active Pubkey: $pk"
-                                }.onSuccess { bridgeTestOutput = it }
-                                    .onFailure { bridgeTestOutput = "Bridge Error: ${it.message}" }
-                            }
-                        },
-                        border = BorderStroke(1.dp, BrePinkDark2)
-                    ) {
-                        Text("Test Signer Bridge")
+                    if (applet.enableNip07) {
+                        OutlinedButton(
+                            onClick = {
+                                scope.launch {
+                                    runCatching {
+                                        val pk = onBridgeCall(applet, "NIP-07 window.nostr", "signer.getPublicKey", JSONObject())
+                                        "NIP-07 Signer Ready — Active Pubkey: $pk"
+                                    }.onSuccess { bridgeTestOutput = it }
+                                        .onFailure { bridgeTestOutput = "Signer Error: ${it.message}" }
+                                }
+                            },
+                            border = BorderStroke(1.dp, BrePinkDark2)
+                        ) {
+                            Text("Test NIP-07 Bridge")
+                        }
                     }
                 }
 

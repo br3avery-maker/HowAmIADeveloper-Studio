@@ -12,12 +12,59 @@ object NostrKinds {
     const val USER_BLOSSOM_SERVERS = 10063
     const val NSITE_ROOT = 15128
     const val NAPPLET_ROOT = 15129
+    const val NIP42_AUTH = 22242
+    const val NIP46_NOSTR_CONNECT = 24133
     const val BLOSSOM_AUTH = 24242
     const val NIP51_CATEGORIZED_LIST = 30001
     const val NIP51_BOOKMARK_SET = 30003
     const val NSITE_LEGACY_FILE = 34128
     const val NSITE_NAMED = 35128
     const val NAPPLET_NAMED = 35129
+}
+
+enum class SignerType(val label: String) {
+    LOCAL_KEYSTORE("Local Encrypted Vault"),
+    NIP55_ANDROID("NIP-55 Android Signer"),
+    NIP46_BUNKER("NIP-46 Remote Bunker"),
+    NPUB_READONLY("Read-Only npub")
+}
+
+/**
+ * Explicit four-stage verification pipeline distinguishing transport connection,
+ * remote acceptance, persistence, and cryptographically verified retrieval.
+ */
+enum class DeliveryVerificationStage {
+    DISCONNECTED,
+    CONNECTED,
+    ACCEPTED,
+    PERSISTED,
+    VERIFIED_RETRIEVAL,
+    REJECTED,
+    FAILED
+}
+
+data class UnsignedNostrEvent(
+    val pubkey: String,
+    val createdAt: Long = System.currentTimeMillis() / 1000L,
+    val kind: Int,
+    val tags: List<List<String>> = emptyList(),
+    val content: String = ""
+) {
+    fun toJsonObject(): JSONObject = JSONObject().apply {
+        if (pubkey.isNotBlank()) put("pubkey", pubkey)
+        put("created_at", createdAt)
+        put("kind", kind)
+        val tagsArr = JSONArray()
+        tags.forEach { row ->
+            val inner = JSONArray()
+            row.forEach { inner.put(it) }
+            tagsArr.put(inner)
+        }
+        put("tags", tagsArr)
+        put("content", content)
+    }
+
+    fun toJsonString(): String = toJsonObject().toString()
 }
 
 data class NostrEvent(
@@ -46,6 +93,13 @@ data class NostrEvent(
     }
 
     fun toJsonString(): String = toJsonObject().toString()
+
+    fun verifySignature(): Boolean {
+        val expectedCommitment = computeCanonicalCommitment(pubkey, createdAt, kind, tags, content)
+        val expectedId = NostrCrypto.sha256Hex(expectedCommitment)
+        if (!expectedId.equals(id, ignoreCase = true)) return false
+        return NostrCrypto.verifySchnorrHex(expectedId, pubkey, sig)
+    }
 
     companion object {
         fun computeCanonicalCommitment(
@@ -104,7 +158,7 @@ data class NostrEvent(
             val tagsJson = json.optJSONArray("tags") ?: JSONArray()
             val tags = buildList {
                 for (i in 0 until tagsJson.length()) {
-                    val rowArr = tagsJson.optJSONArray(i) ?: continue
+                    val rowArr = json.optJSONArray("tags")?.optJSONArray(i) ?: tagsJson.optJSONArray(i) ?: continue
                     val row = buildList {
                         for (j in 0 until rowArr.length()) {
                             add(rowArr.optString(j, ""))
@@ -115,7 +169,7 @@ data class NostrEvent(
             }
             NostrEvent(
                 id = json.getString("id"),
-                pubkey = json.getString("pubkey"),
+                pubkey = json.getString("pubkey").lowercase(),
                 createdAt = json.getLong("created_at"),
                 kind = json.getInt("kind"),
                 tags = tags,
@@ -156,18 +210,33 @@ enum class RelayConnectionStatus {
     ERROR
 }
 
+data class RelayNip11Info(
+    val url: String,
+    val name: String = "",
+    val software: String = "",
+    val supportedNips: Set<Int> = emptySet(),
+    val authRequired: Boolean = false,
+    val paymentRequired: Boolean = false,
+    val maxMessageLength: Int = 0
+)
+
 data class RelayStatusInfo(
     val url: String,
     val status: RelayConnectionStatus = RelayConnectionStatus.DISCONNECTED,
     val latencyMs: Long? = null,
     val eventsReceived: Int = 0,
-    val lastMessage: String? = null
+    val lastMessage: String? = null,
+    val authChallenge: String? = null,
+    val authenticated: Boolean = false
 )
 
 data class RelayPublishReceipt(
     val relayUrl: String,
     val accepted: Boolean,
-    val message: String
+    val message: String,
+    val stage: DeliveryVerificationStage = if (accepted) DeliveryVerificationStage.ACCEPTED else DeliveryVerificationStage.REJECTED,
+    val authRequired: Boolean = message.startsWith("auth-required:", ignoreCase = true),
+    val rateLimited: Boolean = message.startsWith("rate-limited:", ignoreCase = true)
 )
 
 data class RelayPublishSummary(
@@ -175,6 +244,7 @@ data class RelayPublishSummary(
     val receipts: List<RelayPublishReceipt>
 ) {
     val acceptedCount: Int get() = receipts.count { it.accepted }
+    val verifiedRetrievalCount: Int get() = receipts.count { it.stage == DeliveryVerificationStage.VERIFIED_RETRIEVAL }
 }
 
 enum class SignDecision {
@@ -187,8 +257,8 @@ data class PendingSignRequest(
     val requestId: String,
     val appletId: String,
     val appletTitle: String,
-    val protocolLabel: String, // "NIP-5D NAP-SIGNER", "NIP-07 window.nostr", or "Built-in Shell"
-    val method: String, // "signEvent", "nip04Encrypt", "nip04Decrypt"
+    val protocolLabel: String,
+    val method: String,
     val eventKind: Int,
     val contentPreview: String,
     val rawPayloadJson: String,

@@ -2,103 +2,85 @@ package com.example.ui
 
 import android.app.Application
 import android.net.Uri
+import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.data.CatalogStacker
 import com.example.data.DiscoveryDisplayMode
-import com.example.data.GraphicTemplatePreset
+import com.example.data.ForkImportOutcome
 import com.example.data.InstalledAppletEntity
 import com.example.data.LauncherPrefs
-import com.example.data.LauncherViewMode
+import com.example.data.ManagedBlossomItem
 import com.example.data.ManagedRelayItem
 import com.example.data.NoteEntity
+import com.example.data.NsiteProjectEntity
+import com.example.data.NsiteProjectFileEntity
+import com.example.data.NsiteVersionEntity
 import com.example.data.PublishDeploymentReport
+import com.example.data.PublishVerificationBreakdown
 import com.example.data.PublisherProfileEntity
 import com.example.data.ShellRepository
 import com.example.data.SignerAuditEntity
 import com.example.data.SignerPolicyEntity
 import com.example.data.StackedAppletGroup
-import com.example.data.StarterCatalog
 import com.example.data.VaultAccountEntity
 import com.example.data.WallpaperStyle
-import com.example.nostr.NostrCrypto
 import com.example.nostr.NostrEvent
 import com.example.nostr.NostrKinds
 import com.example.nostr.PendingSignRequest
 import com.example.nostr.RelayConnectionStatus
 import com.example.nostr.SignDecision
+import com.example.nostr.UnsignedNostrEvent
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
+enum class PrimaryShellTab {
+    LAUNCHER,
+    DISCOVER,
+    STUDIO,
+    VAULT_NET
+}
+
 sealed interface ShellDestination {
     data object HomeLauncher : ShellDestination
     data class DiscoveryFeed(
-        val initialTabIsNsites: Boolean = false,
         val initialPublisherPubkey: String? = null
     ) : ShellDestination
-    data object UserProfile : ShellDestination
-    data object RelayManager : ShellDestination
-    data object NotesComposer : ShellDestination
-    data class CreatorStudio(val forkSource: InstalledAppletEntity? = null) : ShellDestination
-    data object SelfPublishShell : ShellDestination
+    data object CreatorStudio : ShellDestination
     data object VaultAndAudit : ShellDestination
+    data object RelayManager : ShellDestination
+    data object UserProfile : ShellDestination
+    data object NotesComposer : ShellDestination
     data object WallpaperSettings : ShellDestination
     data class RunningApplet(val appletId: String) : ShellDestination
 }
 
-data class StudioDraftState(
-    val title: String = "My Sovereign Applet",
-    val dTag: String = "my-napplet",
-    val description: String = "Built & published on-device with SovereignShell.",
-    val iconGlyph: String = "✨",
-    val targetKind: Int = NostrKinds.NAPPLET_NAMED,
-    val html: String = DEFAULT_STUDIO_HTML,
-    val css: String = StarterCatalog.COMMON_APPLET_CSS.trimIndent(),
-    val js: String = DEFAULT_STUDIO_JS
-) {
-    companion object {
-        val DEFAULT_STUDIO_HTML = """
-<div class="card">
-  <h2>✨ Custom Napplet</h2>
-  <p>Edit HTML, CSS, and JS in Studio, then publish blobs to Blossom &amp; Nostr relays.</p>
-  <button id="helloSign">Request Signature via NAP</button>
-  <div id="resultBox" class="mono" style="margin-top:10px;"></div>
-</div>
-        """.trimIndent()
-
-        val DEFAULT_STUDIO_JS = """
-document.getElementById('helloSign').onclick = () => {
-  const id = 'st_' + Date.now();
-  window.addEventListener('message', function onReply(ev) {
-    let d = ev.data; if (typeof d === 'string') { try { d = JSON.parse(d); } catch(e){ return; } }
-    if (d && d.id === id && d.reply) {
-      window.removeEventListener('message', onReply);
-      document.getElementById('resultBox').textContent = d.error
-        ? ('Denied: ' + d.error)
-        : ('Signed Event ID: ' + d.result.id.slice(0, 18) + '…');
-    }
-  });
-  window.postMessage({
-    id,
-    type: 'signer.signEvent',
-    event: { kind: 1, content: 'Hello from my self-published Napplet! #nostr #napplet', tags: [] }
-  }, '*');
-};
-        """.trimIndent()
-    }
+fun ShellDestination.primaryTabOrNull(): PrimaryShellTab? = when (this) {
+    ShellDestination.HomeLauncher -> PrimaryShellTab.LAUNCHER
+    is ShellDestination.DiscoveryFeed -> PrimaryShellTab.DISCOVER
+    ShellDestination.CreatorStudio -> PrimaryShellTab.STUDIO
+    ShellDestination.VaultAndAudit,
+    ShellDestination.RelayManager,
+    ShellDestination.UserProfile,
+    ShellDestination.NotesComposer,
+    ShellDestination.WallpaperSettings -> PrimaryShellTab.VAULT_NET
+    is ShellDestination.RunningApplet -> null
 }
 
 data class TransientStatusBanner(
@@ -107,6 +89,7 @@ data class TransientStatusBanner(
     val id: Long = System.currentTimeMillis()
 )
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class ShellViewModel(
     application: Application,
     val repository: ShellRepository = ShellRepository(application)
@@ -125,11 +108,14 @@ class ShellViewModel(
     private val _isWorking = MutableStateFlow(false)
     val isWorking: StateFlow<Boolean> = _isWorking.asStateFlow()
 
-    private val _studioDraft = MutableStateFlow(StudioDraftState())
-    val studioDraft: StateFlow<StudioDraftState> = _studioDraft.asStateFlow()
-
     private val _latestDeployment = MutableStateFlow<PublishDeploymentReport?>(null)
     val latestDeployment: StateFlow<PublishDeploymentReport?> = _latestDeployment.asStateFlow()
+
+    private val _latestPublishVerification = MutableStateFlow<PublishVerificationBreakdown?>(null)
+    val latestPublishVerification: StateFlow<PublishVerificationBreakdown?> = _latestPublishVerification.asStateFlow()
+
+    private val _latestForkOutcome = MutableStateFlow<ForkImportOutcome?>(null)
+    val latestForkOutcome: StateFlow<ForkImportOutcome?> = _latestForkOutcome.asStateFlow()
 
     private val _revealedNsec = MutableStateFlow<String?>(null)
     val revealedNsec: StateFlow<String?> = _revealedNsec.asStateFlow()
@@ -137,6 +123,8 @@ class ShellViewModel(
     private val pendingSignDeferreds = ConcurrentHashMap<String, CompletableDeferred<SignDecision>>()
     private val _activeSignPrompt = MutableStateFlow<PendingSignRequest?>(null)
     val activeSignPrompt: StateFlow<PendingSignRequest?> = _activeSignPrompt.asStateFlow()
+
+    // --- Identity & Preferences ---
 
     val accounts: StateFlow<List<VaultAccountEntity>> = repository.accountsFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -149,6 +137,8 @@ class ShellViewModel(
 
     private val _spamShieldEnabled = MutableStateFlow(true)
     val spamShieldEnabled: StateFlow<Boolean> = _spamShieldEnabled.asStateFlow()
+
+    // --- NIP-5A Nsite Library & Discovery ---
 
     val installedApplets: StateFlow<List<InstalledAppletEntity>> = repository.installedAppletsFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -192,8 +182,17 @@ class ShellViewModel(
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 
+    // --- Adaptive Relay + Blossom Telemetry ---
+
     val managedRelays: StateFlow<List<ManagedRelayItem>> = repository.managedRelaysFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val blossomServers: StateFlow<List<ManagedBlossomItem>> = repository.managedBlossomServersFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val connectedRelayCount: StateFlow<Int> = combine(managedRelays) { arr ->
+        arr.first().count { it.statusInfo.status == RelayConnectionStatus.CONNECTED }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 
     val notes: StateFlow<List<NoteEntity>> = repository.notesFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -204,40 +203,56 @@ class ShellViewModel(
     val signerPolicies: StateFlow<List<SignerPolicyEntity>> = repository.signerPoliciesFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val connectedRelayCount: StateFlow<Int> = combine(managedRelays) { arr ->
-        arr.first().count { it.statusInfo.status == RelayConnectionStatus.CONNECTED }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+    // --- Multi-File Nsite Studio Workspace ---
+
+    val allProjects: StateFlow<List<NsiteProjectEntity>> = repository.projectRepository.allProjectsFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    private val _activeProjectId = MutableStateFlow<String?>(null)
+    val activeProjectId: StateFlow<String?> = _activeProjectId.asStateFlow()
+
+    private val _selectedFilePath = MutableStateFlow("/index.html")
+    val selectedFilePath: StateFlow<String> = _selectedFilePath.asStateFlow()
+
+    val activeProject: StateFlow<NsiteProjectEntity?> = combine(
+        allProjects,
+        _activeProjectId
+    ) { projects, selectedId ->
+        projects.firstOrNull { it.projectId == selectedId } ?: projects.firstOrNull()
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    val activeProjectFiles: StateFlow<List<NsiteProjectFileEntity>> = activeProject
+        .flatMapLatest { proj ->
+            if (proj == null) flowOf(emptyList())
+            else repository.projectRepository.observeProjectFiles(proj.projectId)
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     // --- Navigation ---
 
-    fun navigateTo(destination: ShellDestination) {
-        if (destination is ShellDestination.CreatorStudio && destination.forkSource != null) {
-            val src = destination.forkSource
-            val forkDTag = "${src.dTag}-fork".take(13)
-            _studioDraft.value = StudioDraftState(
-                title = "${src.title} Remix",
-                dTag = forkDTag,
-                description = src.description,
-                iconGlyph = src.iconGlyph,
-                targetKind = src.kind,
-                html = src.inlineHtml.ifBlank { StudioDraftState.DEFAULT_STUDIO_HTML },
-                css = src.inlineCss.ifBlank { StarterCatalog.COMMON_APPLET_CSS.trimIndent() },
-                js = src.inlineJs.ifBlank { StudioDraftState.DEFAULT_STUDIO_JS }
-            )
-            if (src.inlineHtml.isBlank()) {
-                viewModelScope.launch {
-                    runCatching { repository.resolveAppletDocument(src) }
-                        .onSuccess { fetchedDoc ->
-                            if (fetchedDoc.isNotBlank()) {
-                                _studioDraft.update { current ->
-                                    if (current.dTag == forkDTag) current.copy(html = fetchedDoc) else current
-                                }
-                            }
-                        }
-                }
+    fun selectPrimaryTab(tab: PrimaryShellTab) {
+        _revealedNsec.value = null
+        val target = when (tab) {
+            PrimaryShellTab.LAUNCHER -> ShellDestination.HomeLauncher
+            PrimaryShellTab.DISCOVER -> ShellDestination.DiscoveryFeed()
+            PrimaryShellTab.STUDIO -> {
+                ensureStudioProjectReady()
+                ShellDestination.CreatorStudio
             }
+            PrimaryShellTab.VAULT_NET -> ShellDestination.VaultAndAudit
         }
-        _latestDeployment.value = null
+        navStack.clear()
+        navStack.addLast(ShellDestination.HomeLauncher)
+        if (target != ShellDestination.HomeLauncher) {
+            navStack.addLast(target)
+        }
+        _currentDestination.value = target
+    }
+
+    fun navigateTo(destination: ShellDestination) {
+        if (destination == ShellDestination.CreatorStudio) {
+            ensureStudioProjectReady()
+        }
         navStack.addLast(destination)
         _currentDestination.value = destination
     }
@@ -267,7 +282,393 @@ class ShellViewModel(
         _banner.value = null
     }
 
-    // --- Launcher Controls ---
+    fun observeNsiteVersions(coordinate: String): Flow<List<NsiteVersionEntity>> =
+        repository.observeNsiteVersions(coordinate)
+
+    // --- Launcher Manual Address & Site Caching ---
+
+    fun launchOrInstallByAddress(
+        rawAddress: String,
+        openImmediately: Boolean = true,
+        onSuccessClear: () -> Unit = {}
+    ) {
+        val trimmed = rawAddress.trim()
+        if (trimmed.isBlank()) {
+            showBanner("Enter an nsite.lol URL, naddr1…, npub1…, or NIP-05 address", isError = true)
+            return
+        }
+        viewModelScope.launch {
+            _isWorking.value = true
+            runCatching {
+                repository.resolveAndInstallManualNsiteAddress(trimmed, pinToLibrary = true)
+            }.onSuccess { resolved ->
+                onSuccessClear()
+                showBanner("Resolved & verified '${resolved.title}'")
+                if (openImmediately) {
+                    navigateTo(ShellDestination.RunningApplet(resolved.appletId))
+                }
+            }.onFailure { err ->
+                showBanner(err.message ?: "Could not resolve Nsite address", isError = true)
+            }
+            _isWorking.value = false
+        }
+    }
+
+    fun verifyAndCacheSite(applet: InstalledAppletEntity) {
+        viewModelScope.launch {
+            _isWorking.value = true
+            runCatching { repository.prefetchAndVerifySiteAssets(applet) }
+                .onSuccess { updated ->
+                    showBanner(
+                        if (updated.cachedComplete) "All Blossom files verified & cached for ${updated.title}"
+                        else "Cached partial assets for ${updated.title} — some blobs unreachable",
+                        isError = !updated.cachedComplete
+                    )
+                }
+                .onFailure { err ->
+                    showBanner(err.message ?: "Verification failed", isError = true)
+                }
+            _isWorking.value = false
+        }
+    }
+
+    // --- Multi-File Studio, Import, Fork & Verified Publish ---
+
+    fun ensureStudioProjectReady() {
+        viewModelScope.launch {
+            val owner = activeAccount.value?.pubkeyHex.orEmpty()
+            val proj = repository.projectRepository.ensureInitialProjectExists(owner)
+            if (_activeProjectId.value == null) {
+                _activeProjectId.value = proj.projectId
+                _selectedFilePath.value = proj.entryPath
+            }
+        }
+    }
+
+    fun selectProject(projectId: String) {
+        _activeProjectId.value = projectId
+        _latestDeployment.value = null
+        _latestPublishVerification.value = null
+        _latestForkOutcome.value = null
+        val target = allProjects.value.firstOrNull { it.projectId == projectId }
+        if (target != null) {
+            _selectedFilePath.value = target.entryPath
+        }
+    }
+
+    fun selectProjectFile(relativePath: String) {
+        _selectedFilePath.value = relativePath
+    }
+
+    fun createNewScratchProject(title: String, dTag: String, targetKind: Int = NostrKinds.NSITE_NAMED) {
+        viewModelScope.launch {
+            _isWorking.value = true
+            runCatching {
+                repository.projectRepository.createScratchProject(
+                    ownerPubkeyHex = activeAccount.value?.pubkeyHex.orEmpty(),
+                    title = title,
+                    dTag = dTag,
+                    targetKind = targetKind
+                )
+            }.onSuccess { created ->
+                _activeProjectId.value = created.projectId
+                _selectedFilePath.value = created.entryPath
+                _latestDeployment.value = null
+                _latestPublishVerification.value = null
+                _latestForkOutcome.value = null
+                showBanner("Created multi-file project '${created.title}'")
+            }.onFailure { err ->
+                showBanner(err.message ?: "Could not create project", isError = true)
+            }
+            _isWorking.value = false
+        }
+    }
+
+    fun deleteProject(projectId: String) {
+        viewModelScope.launch {
+            runCatching { repository.projectRepository.deleteEntireProject(projectId) }
+                .onSuccess {
+                    if (_activeProjectId.value == projectId) {
+                        _activeProjectId.value = null
+                    }
+                    ensureStudioProjectReady()
+                    showBanner("Deleted local project")
+                }
+        }
+    }
+
+    fun importSingleHtmlUri(uri: Uri) {
+        viewModelScope.launch {
+            _isWorking.value = true
+            runCatching {
+                val app = getApplication<Application>()
+                val name = queryUriFileName(uri).ifBlank { "index.html" }
+                val bytes = app.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    ?: error("Unable to read selected HTML file")
+                repository.projectRepository.importSingleHtmlFile(
+                    ownerPubkeyHex = activeAccount.value?.pubkeyHex.orEmpty(),
+                    titleHint = name,
+                    originalFileName = name,
+                    htmlBytes = bytes
+                )
+            }.onSuccess { created ->
+                _activeProjectId.value = created.projectId
+                _selectedFilePath.value = created.entryPath
+                _latestDeployment.value = null
+                _latestPublishVerification.value = null
+                _latestForkOutcome.value = null
+                showBanner("Imported HTML file into '${created.title}'")
+            }.onFailure { err ->
+                showBanner(err.message ?: "HTML import failed", isError = true)
+            }
+            _isWorking.value = false
+        }
+    }
+
+    fun importZipArchiveUri(uri: Uri) {
+        viewModelScope.launch {
+            _isWorking.value = true
+            runCatching {
+                val app = getApplication<Application>()
+                val name = queryUriFileName(uri).ifBlank { "website.zip" }
+                app.contentResolver.openInputStream(uri)?.use { stream ->
+                    repository.projectRepository.importZipArchive(
+                        ownerPubkeyHex = activeAccount.value?.pubkeyHex.orEmpty(),
+                        titleHint = name,
+                        zipInputStream = stream
+                    )
+                } ?: error("Unable to open selected ZIP archive")
+            }.onSuccess { created ->
+                _activeProjectId.value = created.projectId
+                _selectedFilePath.value = created.entryPath
+                _latestDeployment.value = null
+                _latestPublishVerification.value = null
+                _latestForkOutcome.value = null
+                showBanner("Imported multi-file ZIP into '${created.title}'")
+            }.onFailure { err ->
+                showBanner(err.message ?: "ZIP import failed", isError = true)
+            }
+            _isWorking.value = false
+        }
+    }
+
+    fun importFolderTreeUri(treeUri: Uri) {
+        viewModelScope.launch {
+            _isWorking.value = true
+            runCatching {
+                repository.projectRepository.importFolderFromTreeUri(
+                    context = getApplication(),
+                    ownerPubkeyHex = activeAccount.value?.pubkeyHex.orEmpty(),
+                    treeUri = treeUri
+                )
+            }.onSuccess { created ->
+                _activeProjectId.value = created.projectId
+                _selectedFilePath.value = created.entryPath
+                _latestDeployment.value = null
+                _latestPublishVerification.value = null
+                _latestForkOutcome.value = null
+                showBanner("Imported folder into '${created.title}'")
+            }.onFailure { err ->
+                showBanner(err.message ?: "Folder import failed", isError = true)
+            }
+            _isWorking.value = false
+        }
+    }
+
+    fun forkAppletToStudio(
+        applet: InstalledAppletEntity,
+        specificVersion: NsiteVersionEntity? = null
+    ) {
+        viewModelScope.launch {
+            _isWorking.value = true
+            runCatching {
+                repository.forkSiteIntoProject(applet, specificVersion)
+            }.onSuccess { outcome ->
+                _activeProjectId.value = outcome.project.projectId
+                _selectedFilePath.value = outcome.project.entryPath
+                _latestDeployment.value = null
+                _latestPublishVerification.value = null
+                _latestForkOutcome.value = outcome
+                navigateTo(ShellDestination.CreatorStudio)
+                if (outcome.missingOrCorruptPaths.isEmpty()) {
+                    showBanner("Forked '${applet.title}' (${outcome.verifiedPaths.size} verified files)")
+                } else {
+                    showBanner(
+                        "Forked '${applet.title}' with ${outcome.missingOrCorruptPaths.size} missing/corrupt blob(s)",
+                        isError = true
+                    )
+                }
+            }.onFailure { err ->
+                showBanner(err.message ?: "Fork failed", isError = true)
+            }
+            _isWorking.value = false
+        }
+    }
+
+    fun forkManualAddressToStudio(rawAddress: String, onDone: () -> Unit = {}) {
+        val trimmed = rawAddress.trim()
+        if (trimmed.isBlank()) {
+            showBanner("Enter an Nsite URL, naddr1…, or coordinate to fork", isError = true)
+            return
+        }
+        viewModelScope.launch {
+            _isWorking.value = true
+            runCatching {
+                repository.forkByManualAddress(trimmed)
+            }.onSuccess { outcome ->
+                onDone()
+                _activeProjectId.value = outcome.project.projectId
+                _selectedFilePath.value = outcome.project.entryPath
+                _latestDeployment.value = null
+                _latestPublishVerification.value = null
+                _latestForkOutcome.value = outcome
+                navigateTo(ShellDestination.CreatorStudio)
+                if (outcome.missingOrCorruptPaths.isEmpty()) {
+                    showBanner("Forked ${outcome.verifiedPaths.size} verified Blossom file(s) into Studio")
+                } else {
+                    showBanner(
+                        "Partial fork: ${outcome.missingOrCorruptPaths.size} file(s) missing or hash-mismatched",
+                        isError = true
+                    )
+                }
+            }.onFailure { err ->
+                showBanner(err.message ?: "Could not resolve or fork Nsite", isError = true)
+            }
+            _isWorking.value = false
+        }
+    }
+
+    fun saveActiveProjectMetadata(
+        title: String,
+        dTag: String,
+        targetKind: Int,
+        description: String,
+        entryPath: String
+    ) {
+        val proj = activeProject.value ?: return
+        viewModelScope.launch {
+            repository.projectRepository.updateProjectMetadata(
+                projectId = proj.projectId,
+                title = title,
+                dTag = dTag,
+                targetKind = targetKind,
+                description = description,
+                entryPath = entryPath
+            )
+            showBanner("Saved project settings")
+        }
+    }
+
+    fun saveProjectTextFile(relativePath: String, content: String, announce: Boolean = false) {
+        val proj = activeProject.value ?: return
+        viewModelScope.launch {
+            runCatching {
+                repository.projectRepository.saveTextFile(proj.projectId, relativePath, content)
+            }.onSuccess { saved ->
+                if (announce) {
+                    showBanner("Saved ${saved.relativePath} (${saved.sha256.take(10)}…)")
+                }
+            }.onFailure { err ->
+                showBanner(err.message ?: "Failed saving file", isError = true)
+            }
+        }
+    }
+
+    fun createNewProjectFile(relativePath: String, initialContent: String = "") {
+        val proj = activeProject.value ?: return
+        viewModelScope.launch {
+            runCatching {
+                repository.projectRepository.saveTextFile(proj.projectId, relativePath, initialContent)
+            }.onSuccess { created ->
+                _selectedFilePath.value = created.relativePath
+                showBanner("Created ${created.relativePath}")
+            }.onFailure { err ->
+                showBanner(err.message ?: "Could not create file", isError = true)
+            }
+        }
+    }
+
+    fun importAssetIntoProject(targetRelativePath: String, uri: Uri) {
+        val proj = activeProject.value ?: return
+        viewModelScope.launch {
+            _isWorking.value = true
+            runCatching {
+                val app = getApplication<Application>()
+                val pickedName = queryUriFileName(uri).ifBlank { "asset.bin" }
+                val effectivePath = targetRelativePath.trim().ifBlank { "/assets/$pickedName" }
+                val bytes = app.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    ?: error("Unable to read selected asset")
+                repository.projectRepository.importOrReplaceAsset(proj.projectId, effectivePath, bytes)
+            }.onSuccess { entity ->
+                _selectedFilePath.value = entity.relativePath
+                showBanner("Imported asset ${entity.relativePath} (${entity.sizeBytes} B)")
+            }.onFailure { err ->
+                showBanner(err.message ?: "Asset import failed", isError = true)
+            }
+            _isWorking.value = false
+        }
+    }
+
+    fun renameProjectFile(oldPath: String, newPath: String) {
+        val proj = activeProject.value ?: return
+        viewModelScope.launch {
+            runCatching {
+                repository.projectRepository.renameProjectFile(proj.projectId, oldPath, newPath)
+            }.onSuccess { renamed ->
+                if (renamed != null) {
+                    _selectedFilePath.value = renamed.relativePath
+                    showBanner("Renamed to ${renamed.relativePath}")
+                }
+            }.onFailure { err ->
+                showBanner(err.message ?: "Rename failed", isError = true)
+            }
+        }
+    }
+
+    fun deleteProjectFile(relativePath: String) {
+        val proj = activeProject.value ?: return
+        viewModelScope.launch {
+            repository.projectRepository.deleteProjectFile(proj.projectId, relativePath)
+            if (_selectedFilePath.value == relativePath) {
+                _selectedFilePath.value = proj.entryPath
+            }
+            showBanner("Deleted $relativePath")
+        }
+    }
+
+    fun publishActiveProject() {
+        val proj = activeProject.value
+        if (proj == null) {
+            showBanner("Select or create a project first", isError = true)
+            return
+        }
+        val account = activeAccount.value
+        if (account == null || !account.canSign) {
+            showBanner("Active account is read-only. Switch to a signing identity in Vault & Net.", isError = true)
+            return
+        }
+        viewModelScope.launch {
+            _isWorking.value = true
+            runCatching {
+                repository.projectRepository.publishProjectAsNip5a(
+                    projectId = proj.projectId,
+                    activeAccount = account
+                )
+            }.onSuccess { (report, verification) ->
+                _latestDeployment.value = report
+                _latestPublishVerification.value = verification
+                showBanner(
+                    "Published '${report.title}' — ${verification.verifiedUploadedBlobs} verified blobs, " +
+                        "${verification.verifiedRetrievalRelays}/${verification.acceptedRelays} verified relays"
+                )
+            }.onFailure { err ->
+                showBanner(err.message ?: "NIP-5A publish failed", isError = true)
+            }
+            _isWorking.value = false
+        }
+    }
+
+    // --- Launcher Appearance & Browser Preferences ---
 
     fun toggleLauncherViewMode() {
         viewModelScope.launch {
@@ -281,8 +682,8 @@ class ShellViewModel(
             repository.prefsRepo.toggleDiscoveryMode(current)
             val switchedToFeed = current == DiscoveryDisplayMode.CURATED_GALLERY
             showBanner(
-                if (switchedToFeed) "Switched to Live Relay Feed"
-                else "Switched to Curated App Gallery"
+                if (switchedToFeed) "Switched to Live NIP-5A Relay Feed"
+                else "Switched to Stacked Nsite Gallery"
             )
         }
     }
@@ -314,8 +715,9 @@ class ShellViewModel(
 
     fun updateBlossomServer(url: String) {
         viewModelScope.launch {
-            repository.prefsRepo.setBlossomServer(url)
-            showBanner("Blossom server set to ${url.trim()}")
+            runCatching { repository.setPrimaryBlossomServer(url) }
+                .onSuccess { showBanner("Primary Blossom server set to ${url.trim()}") }
+                .onFailure { showBanner(it.message ?: "Invalid Blossom URL", isError = true) }
         }
     }
 
@@ -323,13 +725,13 @@ class ShellViewModel(
         viewModelScope.launch {
             repository.prefsRepo.setOpenNsitesExternally(enabled)
             showBanner(
-                if (enabled) "Nsites will launch in External Custom Tab sheet"
-                else "Nsites will open in Built-in WebView Sandbox"
+                if (enabled) "Default set to External Browser / Custom Tab"
+                else "Default set to Built-in WebView Runtime"
             )
         }
     }
 
-    // --- User Profile System (Kind 0 + Avatar Upload) ---
+    // --- User Profile System (Kind 0) ---
 
     suspend fun importAvatarUri(uri: Uri): String? =
         repository.copyPickedImageToInternalFile(uri, "avatars", "avatar")
@@ -364,21 +766,55 @@ class ShellViewModel(
         }
     }
 
-    // --- Multi-Account Signer Vault ---
+    // --- Multi-Account Vault + NIP-55 + NIP-46 + Read-Only npub ---
 
     fun generateAccount(alias: String) {
         viewModelScope.launch {
             runCatching { repository.createNewAccount(alias) }
-                .onSuccess { acc -> showBanner("Switched to new identity ${acc.npub.take(14)}…") }
+                .onSuccess { acc -> showBanner("Created & activated ${acc.npub.take(14)}…") }
                 .onFailure { showBanner(it.message ?: "Could not generate key", isError = true) }
         }
     }
 
-    fun importAccount(nsecOrHex: String, alias: String) {
+    fun importAccount(keyInput: String, alias: String) {
         viewModelScope.launch {
-            runCatching { repository.importAccountFromKey(nsecOrHex, alias) }
-                .onSuccess { acc -> showBanner("Imported ${acc.npub.take(14)}… into Hardware Vault") }
-                .onFailure { showBanner(it.message ?: "Invalid nsec key", isError = true) }
+            runCatching { repository.importAccountFromKey(keyInput, alias) }
+                .onSuccess { acc ->
+                    val mode = acc.resolvedSignerType.label
+                    showBanner("Imported ${acc.npub.take(14)}… ($mode)")
+                }
+                .onFailure { showBanner(it.message ?: "Invalid key", isError = true) }
+        }
+    }
+
+    fun addReadOnlyNpub(npubInput: String, alias: String) {
+        viewModelScope.launch {
+            runCatching { repository.addReadOnlyNpubAccount(npubInput, alias) }
+                .onSuccess { acc -> showBanner("Added read-only identity ${acc.npub.take(14)}…") }
+                .onFailure { showBanner(it.message ?: "Invalid npub", isError = true) }
+        }
+    }
+
+    fun connectNip55Signer(preferredPackage: String = "", alias: String = "") {
+        viewModelScope.launch {
+            _isWorking.value = true
+            runCatching { repository.connectNip55SignerAccount(preferredPackage, alias) }
+                .onSuccess { acc -> showBanner("Connected NIP-55 Android signer (${acc.npub.take(14)}…)") }
+                .onFailure { showBanner(it.message ?: "NIP-55 signer connection failed", isError = true) }
+            _isWorking.value = false
+        }
+    }
+
+    fun connectNip46Bunker(bunkerUri: String, alias: String = "", onConnected: () -> Unit = {}) {
+        viewModelScope.launch {
+            _isWorking.value = true
+            runCatching { repository.connectNip46BunkerAccount(bunkerUri, alias) }
+                .onSuccess { acc ->
+                    onConnected()
+                    showBanner("Connected NIP-46 remote bunker (${acc.npub.take(14)}…)")
+                }
+                .onFailure { showBanner(it.message ?: "NIP-46 bunker handshake failed", isError = true) }
+            _isWorking.value = false
         }
     }
 
@@ -386,7 +822,7 @@ class ShellViewModel(
         viewModelScope.launch {
             _revealedNsec.value = null
             repository.switchAccount(pubkeyHex)
-            showBanner("Active Nostr signer switched")
+            showBanner("Active Nostr identity switched")
         }
     }
 
@@ -395,7 +831,12 @@ class ShellViewModel(
             if (_revealedNsec.value != null) {
                 _revealedNsec.value = null
             } else {
-                _revealedNsec.value = repository.exportActiveNsec()
+                val exported = repository.exportActiveNsec()
+                if (exported == null) {
+                    showBanner("Active identity uses an external or read-only signer (no local nsec)", isError = true)
+                } else {
+                    _revealedNsec.value = exported
+                }
             }
         }
     }
@@ -403,18 +844,18 @@ class ShellViewModel(
     fun revokePolicy(policyKey: String) {
         viewModelScope.launch {
             repository.revokePolicy(policyKey)
-            showBanner("Signer permission policy revoked")
+            showBanner("Signing permission policy revoked")
         }
     }
 
-    // --- Relay Management ---
+    // --- Adaptive Relay + Blossom Configuration ---
 
     fun addRelay(urlInput: String, onSuccessClear: () -> Unit = {}) {
         viewModelScope.launch {
             runCatching { repository.addRelayUrl(urlInput) }
                 .onSuccess { normalized ->
                     onSuccessClear()
-                    showBanner("Added & connecting to $normalized")
+                    showBanner("Added & probing $normalized")
                 }
                 .onFailure { err ->
                     showBanner(err.message ?: "Invalid relay URL", isError = true)
@@ -431,7 +872,48 @@ class ShellViewModel(
 
     fun reconnectRelay(url: String) {
         repository.reconnectRelay(url)
-        showBanner("Reconnecting to $url…")
+        showBanner("Reconnecting & probing $url…")
+    }
+
+    fun addBlossomServer(urlInput: String, asPrimary: Boolean = false, onSuccessClear: () -> Unit = {}) {
+        viewModelScope.launch {
+            runCatching { repository.addBlossomServerUrl(urlInput, asPrimary = asPrimary) }
+                .onSuccess { clean ->
+                    onSuccessClear()
+                    showBanner(
+                        if (asPrimary) "Set primary Blossom server: $clean"
+                        else "Added Blossom backup mirror: $clean"
+                    )
+                }
+                .onFailure { err ->
+                    showBanner(err.message ?: "Invalid Blossom URL", isError = true)
+                }
+        }
+    }
+
+    fun setPrimaryBlossomServer(url: String) {
+        viewModelScope.launch {
+            runCatching { repository.setPrimaryBlossomServer(url) }
+                .onSuccess { showBanner("Primary Blossom server updated to $url") }
+                .onFailure { showBanner(it.message ?: "Could not set primary Blossom server", isError = true) }
+        }
+    }
+
+    fun removeBlossomServer(url: String) {
+        viewModelScope.launch {
+            repository.removeBlossomServerUrl(url)
+            showBanner("Removed Blossom server $url")
+        }
+    }
+
+    fun probeAllNetworkEndpoints() {
+        viewModelScope.launch {
+            _isWorking.value = true
+            runCatching { repository.probeAllNetworkHealth() }
+                .onSuccess { showBanner("Probed NIP-11 relay & BUD-01/02 Blossom capabilities") }
+                .onFailure { showBanner(it.message ?: "Network probe failed", isError = true) }
+            _isWorking.value = false
+        }
     }
 
     fun publishNip65Relays() {
@@ -439,14 +921,30 @@ class ShellViewModel(
             _isWorking.value = true
             runCatching { repository.publishRelayListNip65() }
                 .onSuccess { res ->
-                    showBanner("Signed & broadcast NIP-65 relay list (${res.acceptedCount}/${res.receipts.size} relays)")
+                    showBanner(
+                        "Published NIP-65 relay list (${res.acceptedCount} accepted, ${res.verifiedRetrievalCount} verified)"
+                    )
                 }
                 .onFailure { showBanner(it.message ?: "Failed to publish relay list", isError = true) }
             _isWorking.value = false
         }
     }
 
-    // --- Create & Publish Nostr Notes (NIP-01 Kind 1 via Built-in Signer) ---
+    fun publishBlossomListKind10063() {
+        viewModelScope.launch {
+            _isWorking.value = true
+            runCatching { repository.publishBlossomServersKind10063() }
+                .onSuccess { res ->
+                    showBanner(
+                        "Published Kind 10063 Blossom list (${res.acceptedCount} accepted, ${res.verifiedRetrievalCount} verified)"
+                    )
+                }
+                .onFailure { showBanner(it.message ?: "Failed to publish Blossom list", isError = true) }
+            _isWorking.value = false
+        }
+    }
+
+    // --- Notes Composer (NIP-01 Kind 1) ---
 
     fun promptSignAndPublishNote(
         content: String,
@@ -465,8 +963,8 @@ class ShellViewModel(
 
         viewModelScope.launch {
             val active = activeAccount.value
-            if (active == null) {
-                showBanner("No active Nostr account available", isError = true)
+            if (active == null || !active.canSign) {
+                showBanner("Switch to a signing Nostr identity first", isError = true)
                 return@launch
             }
 
@@ -474,7 +972,7 @@ class ShellViewModel(
                 requestInteractiveSignerDecision(
                     appletId = "shell:note-composer",
                     appletTitle = "SovereignShell Note Composer",
-                    protocolLabel = "Built-in Signer (NIP-01)",
+                    protocolLabel = active.resolvedSignerType.label,
                     method = "signEvent",
                     eventKind = NostrKinds.TEXT_NOTE,
                     contentPreview = trimmed,
@@ -499,7 +997,7 @@ class ShellViewModel(
             }.onSuccess { summary ->
                 onPublished()
                 showBanner(
-                    "Signed Kind 1 (${summary.event.id.take(10)}…) & published to ${summary.receipts.size} relays"
+                    "Signed Kind 1 (${summary.event.id.take(10)}…) & published to ${summary.acceptedCount}/${summary.receipts.size} relays"
                 )
             }.onFailure { err ->
                 showBanner(err.message ?: "Failed to sign/publish note", isError = true)
@@ -508,7 +1006,7 @@ class ShellViewModel(
         }
     }
 
-    // --- Discovery, Pinning & Studio Publishing ---
+    // --- Discovery & Pinning ---
 
     fun toggleSpamShield() {
         val next = !_spamShieldEnabled.value
@@ -524,7 +1022,7 @@ class ShellViewModel(
             runCatching { repository.refreshCatalogFromRelays() }
                 .onSuccess {
                     if (!silent) {
-                        showBanner("Syncing NIP-5D Napplets, NIP-5A Nsites & Kind 0 publishers…")
+                        showBanner("Syncing NIP-5A Nsites & Kind 0 publisher profiles…")
                     }
                 }
         }
@@ -538,7 +1036,7 @@ class ShellViewModel(
             runCatching { repository.toggleLocalNip51Bookmark(applet) }
                 .onSuccess { added ->
                     showBanner(
-                        if (added) "Starred ${applet.title} in your NIP-51 gallery list"
+                        if (added) "Starred ${applet.title} in your NIP-51 curated Nsite list"
                         else "Removed ${applet.title} from NIP-51 list"
                     )
                 }
@@ -554,7 +1052,7 @@ class ShellViewModel(
             runCatching { repository.publishNip51CuratedList() }
                 .onSuccess { res ->
                     showBanner(
-                        "Signed & published NIP-51 gallery list (Kind 30003) to ${res.acceptedCount}/${res.receipts.size} relays"
+                        "Published NIP-51 Nsite list (Kind 30003) to ${res.acceptedCount}/${res.receipts.size} relays"
                     )
                 }
                 .onFailure { err ->
@@ -567,7 +1065,7 @@ class ShellViewModel(
     fun setAppletInstalled(applet: InstalledAppletEntity, installed: Boolean) {
         viewModelScope.launch {
             repository.setAppletInstalled(applet.appletId, installed)
-            showBanner(if (installed) "Pinned ${applet.title} to Home Launcher" else "Removed ${applet.title} from Home")
+            showBanner(if (installed) "Saved ${applet.title} to Launcher Library" else "Removed ${applet.title} from Library")
         }
     }
 
@@ -575,79 +1073,14 @@ class ShellViewModel(
         viewModelScope.launch {
             val next = !applet.enableNip07
             repository.setAppletNip07(applet.appletId, next)
-            showBanner(if (next) "Enabled NIP-07 window.nostr for ${applet.title}" else "Switched ${applet.title} to strict NIP-5D isolation")
-        }
-    }
-
-    fun updateStudioDraft(transform: (StudioDraftState) -> StudioDraftState) {
-        _studioDraft.update(transform)
-    }
-
-    fun publishStudioDraft() {
-        val draft = _studioDraft.value
-        if (draft.title.isBlank()) {
-            showBanner("Provide a title for your manifest", isError = true)
-            return
-        }
-        viewModelScope.launch {
-            _isWorking.value = true
-            runCatching {
-                repository.publishProjectToBlossomAndRelays(
-                    title = draft.title,
-                    dTagRaw = draft.dTag,
-                    description = draft.description,
-                    iconGlyph = draft.iconGlyph,
-                    targetKind = draft.targetKind,
-                    indexHtml = draft.html,
-                    styleCss = draft.css,
-                    appJs = draft.js
-                )
-            }.onSuccess { report ->
-                _latestDeployment.value = report
-                showBanner("Published ${report.title} (Kind ${report.kind}) & pinned to Home!")
-            }.onFailure { err ->
-                showBanner(err.message ?: "Publish failed", isError = true)
-            }
-            _isWorking.value = false
-        }
-    }
-
-    fun applyGraphicTemplate(preset: GraphicTemplatePreset) {
-        val (html, css, js) = StarterCatalog.templateDraftFor(preset)
-        _studioDraft.update {
-            it.copy(
-                html = html,
-                css = css,
-                js = js
+            showBanner(
+                if (next) "Enabled NIP-07 window.nostr for ${applet.title}"
+                else "Disabled NIP-07 window.nostr for ${applet.title}"
             )
         }
-        showBanner("Loaded '${preset.label}' graphic template")
     }
 
-    fun executeSelfPublishShell(
-        asRootNsite: Boolean,
-        dTag: String,
-        preset: GraphicTemplatePreset = GraphicTemplatePreset.BREBRE_SPECIMEN
-    ) {
-        viewModelScope.launch {
-            _isWorking.value = true
-            runCatching {
-                repository.selfPublishShellAsNsite(
-                    asRootNsite = asRootNsite,
-                    customDTag = dTag,
-                    preset = preset
-                )
-            }.onSuccess { report ->
-                _latestDeployment.value = report
-                showBanner("Self-published SovereignShell (${preset.badge}) as Kind ${report.kind} Nsite!")
-            }.onFailure { err ->
-                showBanner(err.message ?: "Self-publish failed", isError = true)
-            }
-            _isWorking.value = false
-        }
-    }
-
-    // --- Interactive Built-in Signer Broker (for NIP-5D NAPs, NIP-07 & Shell Prompts) ---
+    // --- User-Controlled NIP-07 Signer Broker (Never Exposes Private Keys to JS) ---
 
     fun resolveSignPrompt(decision: SignDecision) {
         val current = _activeSignPrompt.value ?: return
@@ -664,7 +1097,7 @@ class ShellViewModel(
         contentPreview: String,
         rawPayloadJson: String
     ): Boolean {
-        val (active, _) = repository.getActivePrivateKeyHex() ?: return false
+        val active = repository.getActiveSigningAccount() ?: return false
         val savedAllow = repository.checkSavedPolicy(active.pubkeyHex, appletId, method, eventKind)
         if (savedAllow == true) {
             repository.recordAudit(
@@ -727,8 +1160,8 @@ class ShellViewModel(
         type: String,
         payload: JSONObject
     ): Any? {
-        val (active, privHex) = repository.getActivePrivateKeyHex()
-            ?: error("No active Nostr keypair")
+        val active = repository.dao.getActiveAccount()
+            ?: error("No active Nostr identity")
 
         return when (type) {
             "signer.getPublicKey" -> active.pubkeyHex
@@ -742,6 +1175,9 @@ class ShellViewModel(
             }
 
             "signer.signEvent" -> {
+                require(active.canSign) {
+                    "Active identity (${active.displayName}) is read-only. Switch to a signing identity."
+                }
                 val evJson = payload.optJSONObject("event") ?: error("Missing event object")
                 val kind = evJson.optInt("kind", 1)
                 val content = evJson.optString("content", "")
@@ -763,16 +1199,20 @@ class ShellViewModel(
                     rawPayloadJson = evJson.toString(2)
                 )
                 if (!approved) error("User rejected signature request")
-                NostrEvent.createAndSign(
-                    privKeyHex = privHex,
-                    kind = kind,
-                    content = content,
-                    tags = tags,
-                    createdAt = createdAt
+                repository.signerManager.signEventForAccount(
+                    account = active,
+                    unsigned = UnsignedNostrEvent(
+                        pubkey = active.pubkeyHex,
+                        kind = kind,
+                        content = content,
+                        tags = tags,
+                        createdAt = createdAt
+                    )
                 ).toJsonObject()
             }
 
             "signer.nip04Encrypt" -> {
+                require(active.canSign) { "Read-only identity cannot encrypt" }
                 val peerPub = payload.optString("pubkey").ifBlank { active.pubkeyHex }
                 val plaintext = payload.optString("plaintext")
                 val approved = requestInteractiveSignerDecision(
@@ -785,10 +1225,11 @@ class ShellViewModel(
                     rawPayloadJson = payload.toString(2)
                 )
                 if (!approved) error("User rejected NIP-04 encrypt")
-                NostrCrypto.nip04Encrypt(privHex, peerPub, plaintext)
+                repository.signerManager.nip04Encrypt(active, peerPub, plaintext)
             }
 
             "signer.nip04Decrypt" -> {
+                require(active.canSign) { "Read-only identity cannot decrypt" }
                 val peerPub = payload.optString("pubkey").ifBlank { active.pubkeyHex }
                 val ciphertext = payload.optString("ciphertext")
                 val approved = requestInteractiveSignerDecision(
@@ -801,10 +1242,11 @@ class ShellViewModel(
                     rawPayloadJson = payload.toString(2)
                 )
                 if (!approved) error("User rejected NIP-04 decrypt")
-                NostrCrypto.nip04Decrypt(privHex, peerPub, ciphertext)
+                repository.signerManager.nip04Decrypt(active, peerPub, ciphertext)
             }
 
             "signer.nip44Encrypt" -> {
+                require(active.canSign) { "Read-only identity cannot encrypt" }
                 val peerPub = payload.optString("pubkey").ifBlank { active.pubkeyHex }
                 val plaintext = payload.optString("plaintext")
                 val approved = requestInteractiveSignerDecision(
@@ -817,10 +1259,11 @@ class ShellViewModel(
                     rawPayloadJson = payload.toString(2)
                 )
                 if (!approved) error("User rejected NIP-44 encrypt")
-                NostrCrypto.nip44Encrypt(privHex, peerPub, plaintext)
+                repository.signerManager.nip44Encrypt(active, peerPub, plaintext)
             }
 
             "signer.nip44Decrypt" -> {
+                require(active.canSign) { "Read-only identity cannot decrypt" }
                 val peerPub = payload.optString("pubkey").ifBlank { active.pubkeyHex }
                 val ciphertext = payload.optString("ciphertext")
                 val approved = requestInteractiveSignerDecision(
@@ -833,100 +1276,45 @@ class ShellViewModel(
                     rawPayloadJson = payload.toString(2)
                 )
                 if (!approved) error("User rejected NIP-44 decrypt")
-                NostrCrypto.nip44Decrypt(privHex, peerPub, ciphertext)
+                repository.signerManager.nip44Decrypt(active, peerPub, ciphertext)
             }
 
-            "relay.publish" -> {
-                val evObj = payload.optJSONObject("event") ?: error("Missing signed event")
-                val ev = NostrEvent.fromJson(evObj) ?: error("Invalid NostrEvent JSON")
-                val summary = repository.relayPool.publishEvent(ev)
-                if (ev.kind == NostrKinds.TEXT_NOTE) {
-                    repository.mirrorPublishedNote(ev, summary.acceptedCount)
-                }
-                JSONObject().apply {
-                    put("id", ev.id)
-                    put("accepted", summary.acceptedCount)
-                    put("relays", summary.receipts.size)
-                }
-            }
-
-            "relay.query" -> {
-                val filter = payload.optJSONObject("filter") ?: JSONObject().put("kinds", JSONArray().put(1))
-                val remote = repository.relayPool.queryEventsOnce(filter)
-                val outArr = JSONArray()
-                if (remote.isNotEmpty()) {
-                    remote.forEach { outArr.put(it.toJsonObject()) }
-                } else {
-                    // Fallback include cached local notes matching kind 1
-                    notes.value.take(10).forEach { n ->
-                        if (n.rawEventJson.isNotBlank()) {
-                            runCatching { outArr.put(JSONObject(n.rawEventJson)) }
-                        }
-                    }
-                }
-                outArr
-            }
-
-            "storage.get" -> repository.napStorageGet(applet.appletId, payload.optString("key"))
-            "storage.set" -> {
-                repository.napStorageSet(
-                    applet.appletId,
-                    payload.optString("key"),
-                    payload.optString("value")
-                )
-                true
-            }
-            "storage.remove" -> {
-                repository.napStorageRemove(applet.appletId, payload.optString("key"))
-                true
-            }
-
-            "intent.composeNote" -> {
-                navigateTo(ShellDestination.NotesComposer)
-                true
-            }
-            "intent.openRelays" -> {
-                navigateTo(ShellDestination.RelayManager)
-                true
-            }
-            "intent.openProfile" -> {
-                navigateTo(ShellDestination.UserProfile)
-                true
-            }
-            "intent.openApplet" -> {
-                val target = payload.optString("appletId").ifBlank { payload.optString("dTag") }
-                val match = catalogApplets.value.firstOrNull {
-                    it.appletId == target || it.dTag.equals(target, ignoreCase = true)
-                } ?: error("Target napplet not found: $target")
-                navigateTo(ShellDestination.RunningApplet(match.appletId))
-                true
-            }
-
-            else -> error("Unsupported NAP method: $type")
+            else -> error("Unsupported signer method: $type")
         }
     }
 
     suspend fun previewStudioBridgeCall(
+        project: NsiteProjectEntity,
         protocolLabel: String,
         type: String,
         payload: JSONObject
     ): Any? {
-        val draft = _studioDraft.value
         val active = activeAccount.value
         val syntheticApplet = InstalledAppletEntity(
-            appletId = "studio:preview:${draft.dTag.ifBlank { "draft" }}",
-            kind = draft.targetKind,
+            appletId = "studio:preview:${project.projectId}",
+            kind = project.targetKind,
             authorPubkey = active?.pubkeyHex.orEmpty(),
             authorNpub = active?.npub.orEmpty(),
-            dTag = draft.dTag.ifBlank { "draft" },
-            title = "${draft.title.ifBlank { "Studio Draft" }} (Preview)",
-            description = draft.description,
-            iconGlyph = draft.iconGlyph,
+            dTag = project.dTag.ifBlank { "preview" },
+            title = "${project.title.ifBlank { "Studio Project" }} (Preview)",
+            description = project.description,
+            iconGlyph = "🌐",
             accentHex = "#FF1493",
-            isNsite = draft.targetKind != NostrKinds.NAPPLET_NAMED,
-            enableNip07 = false
+            isNsite = true,
+            enableNip07 = true
         )
         return handleAppletBridgeCall(syntheticApplet, protocolLabel, type, payload)
+    }
+
+    private fun queryUriFileName(uri: Uri): String {
+        val app = getApplication<Application>()
+        return runCatching {
+            app.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                if (c.moveToFirst()) c.getString(0).orEmpty() else ""
+            }.orEmpty()
+        }.getOrDefault("").ifBlank {
+            uri.lastPathSegment?.substringAfterLast('/').orEmpty()
+        }
     }
 
     class Factory(private val application: Application) : ViewModelProvider.Factory {

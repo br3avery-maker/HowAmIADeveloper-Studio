@@ -2,6 +2,7 @@ package com.example.data
 
 import androidx.room.Entity
 import androidx.room.PrimaryKey
+import com.example.nostr.SignerType
 
 @Entity(tableName = "vault_accounts")
 data class VaultAccountEntity(
@@ -16,8 +17,18 @@ data class VaultAccountEntity(
     val badgeGlyph: String = "≠",
     val badgeColorHex: String = "#FF1493",
     val isActive: Boolean = false,
-    val createdAt: Long = System.currentTimeMillis()
-)
+    val createdAt: Long = System.currentTimeMillis(),
+    val signerType: String = SignerType.LOCAL_KEYSTORE.name,
+    val signerPackage: String = "",
+    val bunkerUri: String = "",
+    val bunkerClientPubkeyHex: String = ""
+) {
+    val resolvedSignerType: SignerType
+        get() = runCatching { SignerType.valueOf(signerType) }.getOrDefault(SignerType.LOCAL_KEYSTORE)
+
+    val canSign: Boolean
+        get() = resolvedSignerType != SignerType.NPUB_READONLY
+}
 
 @Entity(tableName = "configured_relays")
 data class RelayEntity(
@@ -25,6 +36,51 @@ data class RelayEntity(
     val readEnabled: Boolean = true,
     val writeEnabled: Boolean = true,
     val addedAt: Long = System.currentTimeMillis()
+)
+
+@Entity(tableName = "relay_health")
+data class RelayHealthEntity(
+    @PrimaryKey val url: String,
+    val supportedNipsCsv: String = "",
+    val softwareInfo: String = "",
+    val authRequired: Boolean = false,
+    val paymentRequired: Boolean = false,
+    val maxMessageBytes: Int = 0,
+    val avgLatencyMs: Long = 0L,
+    val successCount: Int = 0,
+    val failureCount: Int = 0,
+    val consecutiveFailures: Int = 0,
+    val verifiedPublishCount: Int = 0,
+    val lastSuccessAt: Long = 0L,
+    val lastFailureAt: Long = 0L,
+    val lastErrorReason: String = "",
+    val lastProbedAt: Long = 0L
+)
+
+@Entity(tableName = "configured_blossom_servers")
+data class ConfiguredBlossomServerEntity(
+    @PrimaryKey val serverUrl: String,
+    val enabled: Boolean = true,
+    val isBackupMirror: Boolean = false,
+    val addedAt: Long = System.currentTimeMillis()
+)
+
+@Entity(tableName = "blossom_server_health")
+data class BlossomServerHealthEntity(
+    @PrimaryKey val serverUrl: String,
+    val requiresAuth: Boolean = true,
+    val maxUploadBytes: Long = 0L,
+    val supportsMirror: Boolean = false,
+    val avgLatencyMs: Long = 0L,
+    val uploadSuccessCount: Int = 0,
+    val uploadFailureCount: Int = 0,
+    val verifiedRetrievalCount: Int = 0,
+    val hashMismatchCount: Int = 0,
+    val consecutiveFailures: Int = 0,
+    val lastSuccessAt: Long = 0L,
+    val lastFailureAt: Long = 0L,
+    val lastStatusMessage: String = "",
+    val lastProbedAt: Long = 0L
 )
 
 @Entity(tableName = "nostr_notes")
@@ -44,8 +100,8 @@ data class NoteEntity(
 
 @Entity(tableName = "installed_applets")
 data class InstalledAppletEntity(
-    @PrimaryKey val appletId: String, // e.g., "35129:pubkey:dTag" or "builtin:pulsefeed"
-    val kind: Int, // 35129 (Napplet) or 35128 / 15128 (Nsite)
+    @PrimaryKey val appletId: String, // e.g., "35128:pubkey:dTag" or "15128:pubkey:root"
+    val kind: Int, // 35128 (Named Nsite) or 15128 (Root Nsite)
     val authorPubkey: String,
     val authorNpub: String,
     val dTag: String,
@@ -54,7 +110,7 @@ data class InstalledAppletEntity(
     val iconGlyph: String,
     val accentHex: String,
     val isNsite: Boolean,
-    val enableNip07: Boolean = false,
+    val enableNip07: Boolean = true,
     val blossomServer: String = "https://blossom.primal.net",
     val indexSha256: String = "",
     val manifestPathsJson: String = "{}",
@@ -63,6 +119,68 @@ data class InstalledAppletEntity(
     val inlineJs: String = "",
     val isInstalled: Boolean = true,
     val pinOrder: Int = 0,
+    val updatedAt: Long = System.currentTimeMillis(),
+    val latestEventId: String = "",
+    val cachedComplete: Boolean = false
+)
+
+@Entity(tableName = "nsite_versions")
+data class NsiteVersionEntity(
+    @PrimaryKey val eventId: String,
+    val coordinate: String, // "$kind:$authorPubkey:$dTag"
+    val kind: Int,
+    val authorPubkey: String,
+    val authorNpub: String,
+    val dTag: String,
+    val title: String,
+    val description: String,
+    val indexSha256: String,
+    val fileCount: Int,
+    val blossomServersCsv: String,
+    val manifestPathsJson: String,
+    val rawEventJson: String,
+    val signatureVerified: Boolean,
+    val createdAtSec: Long,
+    val discoveredAt: Long = System.currentTimeMillis()
+)
+
+@Entity(tableName = "nsite_projects")
+data class NsiteProjectEntity(
+    @PrimaryKey val projectId: String,
+    val ownerPubkeyHex: String,
+    val title: String,
+    val dTag: String,
+    val targetKind: Int, // 35128 Named Nsite or 15128 Root Nsite
+    val description: String,
+    val entryPath: String = "/index.html",
+    val sourceType: String = "SCRATCH", // SCRATCH, HTML_FILE, ZIP_ARCHIVE, FOLDER, FORK
+    val forkSourceCoordinate: String = "",
+    val forkSourceEventId: String = "",
+    val forkSourcePubkey: String = "",
+    val forkSourceNpub: String = "",
+    val forkSourceDTag: String = "",
+    val forkSourceVersionSec: Long = 0L,
+    val incompleteImportWarning: String = "",
+    val versionCounter: Int = 1,
+    val lastPublishedEventId: String = "",
+    val lastPublishedUrl: String = "",
+    val lastPublishedAt: Long = 0L,
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis()
+) {
+    val isFork: Boolean get() = forkSourcePubkey.isNotBlank() || sourceType == "FORK"
+}
+
+@Entity(tableName = "nsite_project_files", primaryKeys = ["projectId", "relativePath"])
+data class NsiteProjectFileEntity(
+    val projectId: String,
+    val relativePath: String, // Normalized POSIX path starting with "/", e.g. "/index.html", "/assets/app.js"
+    val mimeType: String,
+    val isBinary: Boolean,
+    val sizeBytes: Long,
+    val sha256: String,
+    val textContent: String = "",
+    val diskBlobPath: String = "",
     val updatedAt: Long = System.currentTimeMillis()
 )
 
@@ -142,4 +260,3 @@ data class PublisherProfileEntity(
         }
     }
 }
-

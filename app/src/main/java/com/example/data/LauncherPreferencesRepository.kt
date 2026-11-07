@@ -37,7 +37,7 @@ data class LauncherPrefs(
     val customWallpaperPath: String = "",
     val scrimDimAlpha: Float = 0.36f,
     val primaryBlossomServer: String = "https://blossom.primal.net",
-    val openNsitesExternally: Boolean = true
+    val openNsitesExternally: Boolean = false
 )
 
 class LauncherPreferencesRepository(context: Context) {
@@ -62,7 +62,7 @@ class LauncherPreferencesRepository(context: Context) {
             customWallpaperPath = prefs[KEY_CUSTOM_WALLPAPER].orEmpty(),
             scrimDimAlpha = (prefs[KEY_SCRIM_ALPHA] ?: 0.36f).coerceIn(0.10f, 0.85f),
             primaryBlossomServer = prefs[KEY_BLOSSOM_SERVER] ?: "https://blossom.primal.net",
-            openNsitesExternally = prefs[KEY_OPEN_NSITES_EXTERNALLY] ?: true
+            openNsitesExternally = prefs[KEY_OPEN_NSITES_EXTERNALLY] ?: false
         )
     }
 

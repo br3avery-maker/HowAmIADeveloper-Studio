@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -43,6 +44,8 @@ class RelayPoolClient(
     private val pendingOkCallbacks = ConcurrentHashMap<String, CompletableDeferred<RelayPublishReceipt>>()
     private val queryBuffers = ConcurrentHashMap<String, MutableList<NostrEvent>>()
     private val queryEoseSignals = ConcurrentHashMap<String, CompletableDeferred<Unit>>()
+    private val queryTargetCounts = ConcurrentHashMap<String, Int>()
+    private val queryEoseCounts = ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>()
 
     private val _relayStatuses = MutableStateFlow<Map<String, RelayStatusInfo>>(emptyMap())
     val relayStatuses: StateFlow<Map<String, RelayStatusInfo>> = _relayStatuses.asStateFlow()
@@ -50,16 +53,16 @@ class RelayPoolClient(
     private val _incomingEvents = MutableSharedFlow<Pair<String, NostrEvent>>(extraBufferCapacity = 768)
     val incomingEvents: SharedFlow<Pair<String, NostrEvent>> = _incomingEvents.asSharedFlow()
 
+    var healthObserver: ((url: String, success: Boolean, latencyMs: Long?, errorReason: String?) -> Unit)? = null
+
     fun syncRelays(urls: List<String>) {
         val normalizedSet = urls.map { normalizeRelayUrl(it) }.filter { it.isNotBlank() }.toSet()
-        // Remove user-configured sockets no longer present (keep capped ephemeral outbox sockets)
         val existingKeys = sockets.keys.toList()
         for (existing in existingKeys) {
             if (existing !in normalizedSet && existing !in ephemeralOutboxUrls) {
                 disconnectRelay(existing, removeFromMap = true)
             }
         }
-        // Connect missing or disconnected sockets
         for (url in normalizedSet) {
             val current = _relayStatuses.value[url]?.status
             if (current != RelayConnectionStatus.CONNECTED && current != RelayConnectionStatus.CONNECTING) {
@@ -73,7 +76,7 @@ class RelayPoolClient(
         if (url.isBlank()) return
         if (isEphemeralOutbox) {
             if (sockets.containsKey(url)) return
-            if (ephemeralOutboxUrls.size >= 6) return
+            if (ephemeralOutboxUrls.size >= 8) return
             ephemeralOutboxUrls.add(url)
         }
         sockets.remove(url)?.cancel()
@@ -100,54 +103,43 @@ class RelayPoolClient(
                     )
                 }
             }
+            healthObserver?.invoke(url, false, null, err.message ?: "Invalid URL")
             return
         }
 
         val ws = okHttpClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                val rtt = System.currentTimeMillis() - (connectStartTimes[url] ?: System.currentTimeMillis())
+                val rtt = (System.currentTimeMillis() - (connectStartTimes[url] ?: System.currentTimeMillis()))
+                    .coerceAtLeast(1L)
                 if (!isEphemeralOutbox) {
                     updateStatus(url) { prev ->
                         (prev ?: RelayStatusInfo(url = url)).copy(
                             status = RelayConnectionStatus.CONNECTED,
-                            latencyMs = rtt.coerceAtLeast(1L),
+                            latencyMs = rtt,
                             lastMessage = "Connected (${rtt}ms)"
                         )
                     }
                 }
+                healthObserver?.invoke(url, true, rtt, null)
                 val suffix = url.hashCode().toUInt().toString(16)
 
-                // 1. Priority subscription for tracked/featured creators (including user's pubkey)
+                // 1. Priority subscription for tracked/featured Nsite publishers
                 sendTrackedAuthorsSubscription(webSocket, "disc_tracked_$suffix")
 
                 if (!isEphemeralOutbox) {
-                    // 2. Split global subscriptions so Kind 15128 root spam never starves NIP-5D or Named Nsites
-                    val filterNotes = JSONObject().apply {
-                        put("kinds", JSONArray().put(NostrKinds.TEXT_NOTE))
-                        put("limit", 20)
-                    }
-                    val filterNapplets = JSONObject().apply {
-                        put(
-                            "kinds",
-                            JSONArray()
-                                .put(NostrKinds.NAPPLET_NAMED)
-                                .put(NostrKinds.NAPPLET_ROOT)
-                                .put(NostrKinds.NAPPLET_SNAPSHOT)
-                        )
-                        put("limit", 100)
-                    }
+                    // 2. NIP-5A Nsite discovery subscriptions (Named 35128, Root 15128, Legacy 34128)
                     val filterNamedNsites = JSONObject().apply {
                         put("kinds", JSONArray().put(NostrKinds.NSITE_NAMED))
-                        put("limit", 80)
+                        put("limit", 90)
                     }
                     val filterRootNsites = JSONObject().apply {
                         put("kinds", JSONArray().put(NostrKinds.NSITE_ROOT))
-                        put("limit", 35)
+                        put("limit", 45)
                     }
                     val filterLegacyRootNsites = JSONObject().apply {
                         put("kinds", JSONArray().put(NostrKinds.NSITE_LEGACY_FILE))
                         put("#d", JSONArray().put("/index.html").put("index.html"))
-                        put("limit", 25)
+                        put("limit", 30)
                     }
                     val filterNip51Lists = JSONObject().apply {
                         put(
@@ -158,9 +150,10 @@ class RelayPoolClient(
                         )
                         put("limit", 40)
                     }
-                    webSocket.send(
-                        JSONArray().put("REQ").put("shell_nap_$suffix").put(filterNapplets).toString()
-                    )
+                    val filterNotes = JSONObject().apply {
+                        put("kinds", JSONArray().put(NostrKinds.TEXT_NOTE))
+                        put("limit", 20)
+                    }
                     webSocket.send(
                         JSONArray().put("REQ").put("shell_nsite_$suffix")
                             .put(filterNamedNsites)
@@ -196,17 +189,112 @@ class RelayPoolClient(
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 sockets.remove(url)
+                val msg = t.localizedMessage?.take(60) ?: "Connection failed"
                 if (!isEphemeralOutbox) {
                     updateStatus(url) { prev ->
                         (prev ?: RelayStatusInfo(url = url)).copy(
                             status = RelayConnectionStatus.ERROR,
-                            lastMessage = t.localizedMessage?.take(60) ?: "Connection failed"
+                            lastMessage = msg
                         )
                     }
                 }
+                healthObserver?.invoke(url, false, null, msg)
             }
         })
         sockets[url] = ws
+    }
+
+    /**
+     * Fetches NIP-11 Relay Information Document (`Accept: application/nostr+json`) to inspect
+     * supported NIPs, auth/payment policies, max message limits, and server software.
+     */
+    suspend fun probeRelayNip11(rawUrl: String): RelayNip11Info? = withContext(Dispatchers.IO) {
+        val wsUrl = normalizeRelayUrl(rawUrl)
+        if (wsUrl.isBlank()) return@withContext null
+        val httpUrl = when {
+            wsUrl.startsWith("wss://") -> "https://" + wsUrl.removePrefix("wss://")
+            wsUrl.startsWith("ws://") -> "http://" + wsUrl.removePrefix("ws://")
+            else -> return@withContext null
+        }
+        val probeClient = okHttpClient.newBuilder()
+            .connectTimeout(5, TimeUnit.SECONDS)
+            .readTimeout(5, TimeUnit.SECONDS)
+            .build()
+
+        runCatching {
+            val req = Request.Builder()
+                .url(httpUrl)
+                .header("Accept", "application/nostr+json")
+                .get()
+                .build()
+            probeClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@use null
+                val body = resp.body?.string().orEmpty()
+                if (body.isBlank()) return@use null
+                val json = JSONObject(body)
+                val nipsArr = json.optJSONArray("supported_nips") ?: JSONArray()
+                val nips = buildSet {
+                    for (i in 0 until nipsArr.length()) {
+                        val v = nipsArr.optInt(i, -1)
+                        if (v >= 0) add(v)
+                    }
+                }
+                val lim = json.optJSONObject("limitation")
+                RelayNip11Info(
+                    url = wsUrl,
+                    name = json.optString("name"),
+                    software = json.optString("software"),
+                    supportedNips = nips,
+                    authRequired = lim?.optBoolean("auth_required", false) ?: false,
+                    paymentRequired = lim?.optBoolean("payment_required", false) ?: false,
+                    maxMessageLength = lim?.optInt("max_message_length", 0) ?: 0
+                )
+            }
+        }.getOrNull()
+    }
+
+    /**
+     * Responds to a NIP-42 `AUTH` challenge on `rawUrl` with a signed Kind 22242 event.
+     */
+    suspend fun authenticateRelayNip42(
+        rawUrl: String,
+        signEvent: suspend (UnsignedNostrEvent) -> NostrEvent,
+        pubkeyHex: String,
+        timeoutMs: Long = 3500L
+    ): Boolean {
+        val url = normalizeRelayUrl(rawUrl)
+        val challenge = _relayStatuses.value[url]?.authChallenge ?: return false
+        val ws = sockets[url] ?: return false
+        val unsigned = UnsignedNostrEvent(
+            pubkey = pubkeyHex,
+            kind = NostrKinds.NIP42_AUTH,
+            tags = listOf(
+                listOf("relay", url),
+                listOf("challenge", challenge)
+            ),
+            content = ""
+        )
+        val signed = runCatching { signEvent(unsigned) }.getOrNull() ?: return false
+        val key = "$url|${signed.id}"
+        val def = CompletableDeferred<RelayPublishReceipt>()
+        pendingOkCallbacks[key] = def
+        val sent = ws.send(JSONArray().put("AUTH").put(signed.toJsonObject()).toString())
+        if (!sent) {
+            pendingOkCallbacks.remove(key)
+            return false
+        }
+        val receipt = withTimeoutOrNull(timeoutMs) { def.await() }
+        pendingOkCallbacks.remove(key)
+        val ok = receipt?.accepted == true
+        if (ok) {
+            updateStatus(url) { prev ->
+                (prev ?: RelayStatusInfo(url = url)).copy(
+                    authenticated = true,
+                    lastMessage = "NIP-42 Authenticated"
+                )
+            }
+        }
+        return ok
     }
 
     private fun sendTrackedAuthorsSubscription(ws: WebSocket, subId: String) {
@@ -262,10 +350,6 @@ class RelayPoolClient(
         }
     }
 
-    /**
-     * Registers `pubkeyHex` as a tracked creator and immediately queries all Nsites, Napplets,
-     * Kind 0 metadata, NIP-65 outbox relays, and Blossom server lists across active + outbox relays.
-     */
     fun trackAndQueryAuthor(pubkeyHex: String, extraOutboxRelays: List<String> = emptyList()) {
         val pk = pubkeyHex.trim().lowercase()
         if (pk.length != 64) return
@@ -273,7 +357,7 @@ class RelayPoolClient(
 
         extraOutboxRelays.forEach { rawUrl ->
             val norm = normalizeRelayUrl(rawUrl)
-            if (norm.startsWith("wss://") && !sockets.containsKey(norm)) {
+            if ((norm.startsWith("wss://") || norm.startsWith("ws://")) && !sockets.containsKey(norm)) {
                 connectRelay(norm, isEphemeralOutbox = true)
             }
         }
@@ -291,24 +375,18 @@ class RelayPoolClient(
 
     fun refreshDiscoveryCatalog() {
         val token = UUID.randomUUID().toString().take(6)
-        val filterNapplets = JSONObject().apply {
-            put(
-                "kinds",
-                JSONArray()
-                    .put(NostrKinds.NAPPLET_NAMED)
-                    .put(NostrKinds.NAPPLET_ROOT)
-                    .put(NostrKinds.NAPPLET_SNAPSHOT)
-            )
-            put("limit", 100)
-        }
         val filterNamedNsites = JSONObject().apply {
             put("kinds", JSONArray().put(NostrKinds.NSITE_NAMED))
-            put("limit", 80)
+            put("limit", 90)
+        }
+        val filterRootNsites = JSONObject().apply {
+            put("kinds", JSONArray().put(NostrKinds.NSITE_ROOT))
+            put("limit", 45)
         }
         val filterLegacyRootNsites = JSONObject().apply {
             put("kinds", JSONArray().put(NostrKinds.NSITE_LEGACY_FILE))
             put("#d", JSONArray().put("/index.html").put("index.html"))
-            put("limit", 25)
+            put("limit", 30)
         }
         val filterNip51 = JSONObject().apply {
             put(
@@ -319,11 +397,11 @@ class RelayPoolClient(
             )
             put("limit", 40)
         }
-        val napMsg = JSONArray().put("REQ").put("disc_nap_$token").put(filterNapplets).toString()
         val nsiteMsg = JSONArray()
             .put("REQ")
             .put("disc_ns_$token")
             .put(filterNamedNsites)
+            .put(filterRootNsites)
             .put(filterLegacyRootNsites)
             .toString()
         val nip51Msg = JSONArray().put("REQ").put("disc_list_$token").put(filterNip51).toString()
@@ -333,7 +411,6 @@ class RelayPoolClient(
             if (st == RelayConnectionStatus.CONNECTED || url in ephemeralOutboxUrls) {
                 sendTrackedAuthorsSubscription(ws, "disc_tracked_$token")
                 if (url !in ephemeralOutboxUrls) {
-                    ws.send(napMsg)
                     ws.send(nsiteMsg)
                     ws.send(nip51Msg)
                 }
@@ -382,45 +459,88 @@ class RelayPoolClient(
         sockets.values.forEach { ws -> ws.send(reqMsg) }
     }
 
-    suspend fun queryEventsOnce(filterJson: JSONObject, timeoutMs: Long = 3200L): List<NostrEvent> {
-        val activeSockets = sockets.values.toList()
-        if (activeSockets.isEmpty()) return emptyList()
+    suspend fun queryEventsOnce(
+        filterJson: JSONObject,
+        timeoutMs: Long = 3200L,
+        specificRelays: List<String> = emptyList()
+    ): List<NostrEvent> {
+        specificRelays.forEach { raw ->
+            val norm = normalizeRelayUrl(raw)
+            if (norm.isNotBlank() && !sockets.containsKey(norm)) {
+                connectRelay(norm, isEphemeralOutbox = true)
+            }
+        }
+        val targetSockets = if (specificRelays.isNotEmpty()) {
+            val allowed = specificRelays.map { normalizeRelayUrl(it) }.toSet()
+            sockets.filterKeys { it in allowed }.values.toList().ifEmpty { sockets.values.toList() }
+        } else {
+            sockets.values.toList()
+        }
+        if (targetSockets.isEmpty()) return emptyList()
 
-        val subId = "nap_q_${UUID.randomUUID().toString().take(8)}"
-        val buffer = ConcurrentHashMap.newKeySet<NostrEvent>()
+        val subId = "ns_q_${UUID.randomUUID().toString().take(8)}"
         val listHolder = java.util.Collections.synchronizedList(mutableListOf<NostrEvent>())
         queryBuffers[subId] = listHolder
         val signal = CompletableDeferred<Unit>()
         queryEoseSignals[subId] = signal
+        queryTargetCounts[subId] = targetSockets.size
+        queryEoseCounts[subId] = java.util.concurrent.atomic.AtomicInteger(0)
 
         val reqText = JSONArray().put("REQ").put(subId).put(filterJson).toString()
-        activeSockets.forEach { ws -> ws.send(reqText) }
+        var sentCount = 0
+        targetSockets.forEach { ws ->
+            if (ws.send(reqText)) sentCount++
+        }
+        if (sentCount == 0) {
+            queryEoseSignals.remove(subId)
+            queryTargetCounts.remove(subId)
+            queryEoseCounts.remove(subId)
+            queryBuffers.remove(subId)
+            return emptyList()
+        }
+        queryTargetCounts[subId] = sentCount
 
         withTimeoutOrNull(timeoutMs) { signal.await() }
 
         val closeText = JSONArray().put("CLOSE").put(subId).toString()
-        activeSockets.forEach { ws -> ws.send(closeText) }
+        targetSockets.forEach { ws -> ws.send(closeText) }
         queryEoseSignals.remove(subId)
+        queryTargetCounts.remove(subId)
+        queryEoseCounts.remove(subId)
         val collected = queryBuffers.remove(subId)?.toList().orEmpty()
-        collected.forEach { buffer.add(it) }
-        return buffer.distinctBy { it.id }.sortedByDescending { it.createdAt }
+        return collected
+            .filter { it.verifySignature() }
+            .distinctBy { it.id }
+            .sortedByDescending { it.createdAt }
     }
 
-    suspend fun publishEvent(event: NostrEvent, timeoutMs: Long = 4000L): RelayPublishSummary {
-        val currentMap = _relayStatuses.value
-        val targetUrls = currentMap.keys.toList()
-        if (targetUrls.isEmpty()) {
+    /**
+     * Publishes a signed event to target relays and optionally performs a round-trip `REQ`
+     * verification to prove `VERIFIED_RETRIEVAL` vs simple `ACCEPTED`.
+     */
+    suspend fun publishEvent(
+        event: NostrEvent,
+        timeoutMs: Long = 4000L,
+        targetRelayUrls: List<String>? = null,
+        verifyRetrieval: Boolean = false
+    ): RelayPublishSummary {
+        val urls = (targetRelayUrls ?: _relayStatuses.value.keys.toList())
+            .map { normalizeRelayUrl(it) }
+            .filter { it.isNotBlank() }
+            .distinct()
+
+        if (urls.isEmpty()) {
             return RelayPublishSummary(event, emptyList())
         }
 
-        targetUrls.forEach { url ->
+        urls.forEach { url ->
             if (sockets[url] == null) {
                 connectRelay(url)
             }
         }
 
         val payload = JSONArray().put("EVENT").put(event.toJsonObject()).toString()
-        val deferredList = targetUrls.map { url ->
+        val deferredList = urls.map { url ->
             val key = "$url|${event.id}"
             val def = CompletableDeferred<RelayPublishReceipt>()
             pendingOkCallbacks[key] = def
@@ -432,28 +552,122 @@ class RelayPoolClient(
                     RelayPublishReceipt(
                         relayUrl = url,
                         accepted = false,
-                        message = "Relay offline or queued failed"
+                        message = "Relay offline or WebSocket queue full",
+                        stage = DeliveryVerificationStage.DISCONNECTED
                     )
                 )
             }
             url to def
         }
 
-        val receipts = deferredList.map { (url, def) ->
+        val initialReceipts = deferredList.map { (url, def) ->
             val key = "$url|${event.id}"
             val result = withTimeoutOrNull(timeoutMs) { def.await() }
             pendingOkCallbacks.remove(key)
-            result ?: RelayPublishReceipt(
+            val finalReceipt = result ?: RelayPublishReceipt(
                 relayUrl = url,
-                accepted = _relayStatuses.value[url]?.status == RelayConnectionStatus.CONNECTED,
-                message = if (_relayStatuses.value[url]?.status == RelayConnectionStatus.CONNECTED) {
-                    "Dispatched over active WebSocket"
+                accepted = false,
+                message = "Timed out waiting for relay OK",
+                stage = if (_relayStatuses.value[url]?.status == RelayConnectionStatus.CONNECTED) {
+                    DeliveryVerificationStage.CONNECTED
                 } else {
-                    "Timed out waiting for OK"
+                    DeliveryVerificationStage.DISCONNECTED
                 }
             )
+            healthObserver?.invoke(
+                url,
+                finalReceipt.accepted,
+                _relayStatuses.value[url]?.latencyMs,
+                if (finalReceipt.accepted) null else finalReceipt.message
+            )
+            finalReceipt
         }
-        return RelayPublishSummary(event = event, receipts = receipts)
+
+        if (!verifyRetrieval) {
+            return RelayPublishSummary(event = event, receipts = initialReceipts)
+        }
+
+        // Round-trip verification: query back by event ID on each relay that accepted it
+        val verifiedReceipts = initialReceipts.map { receipt ->
+            if (!receipt.accepted) {
+                receipt
+            } else {
+                val retrieved = verifySingleRelayHasEvent(receipt.relayUrl, event.id, 2200L)
+                if (retrieved) {
+                    receipt.copy(
+                        stage = DeliveryVerificationStage.VERIFIED_RETRIEVAL,
+                        message = "${receipt.message} • Verified retrieval"
+                    )
+                } else {
+                    receipt.copy(
+                        stage = DeliveryVerificationStage.PERSISTED,
+                        message = "${receipt.message} • Accepted (pending index)"
+                    )
+                }
+            }
+        }
+        return RelayPublishSummary(event = event, receipts = verifiedReceipts)
+    }
+
+    suspend fun verifySingleRelayHasEvent(
+        rawRelayUrl: String,
+        eventId: String,
+        timeoutMs: Long = 2200L
+    ): Boolean {
+        val url = normalizeRelayUrl(rawRelayUrl)
+        val ws = sockets[url] ?: return false
+        val subId = "ver_${UUID.randomUUID().toString().take(8)}"
+        val listHolder = java.util.Collections.synchronizedList(mutableListOf<NostrEvent>())
+        queryBuffers[subId] = listHolder
+        val signal = CompletableDeferred<Unit>()
+        queryEoseSignals[subId] = signal
+        queryTargetCounts[subId] = 1
+        queryEoseCounts[subId] = java.util.concurrent.atomic.AtomicInteger(0)
+
+        val filter = JSONObject().apply {
+            put("ids", JSONArray().put(eventId))
+            put("limit", 1)
+        }
+        val sent = ws.send(JSONArray().put("REQ").put(subId).put(filter).toString())
+        if (!sent) {
+            queryEoseSignals.remove(subId)
+            queryTargetCounts.remove(subId)
+            queryEoseCounts.remove(subId)
+            queryBuffers.remove(subId)
+            return false
+        }
+
+        withTimeoutOrNull(timeoutMs) { signal.await() }
+        ws.send(JSONArray().put("CLOSE").put(subId).toString())
+        queryEoseSignals.remove(subId)
+        queryTargetCounts.remove(subId)
+        queryEoseCounts.remove(subId)
+        val events = queryBuffers.remove(subId)?.toList().orEmpty()
+        return events.any { it.id.equals(eventId, ignoreCase = true) && it.verifySignature() }
+    }
+
+    /**
+     * Opens a NIP-46 Nostr Connect listener (`Kind 24133` tagged with `#p = [clientPubkeyHex]`)
+     * across the specified bunker relays.
+     */
+    fun ensureNip46Subscription(bunkerRelays: List<String>, clientPubkeyHex: String): String {
+        val subId = "nip46_${clientPubkeyHex.take(10)}"
+        val filter = JSONObject().apply {
+            put("kinds", JSONArray().put(NostrKinds.NIP46_NOSTR_CONNECT))
+            put("#p", JSONArray().put(clientPubkeyHex.lowercase()))
+            put("since", (System.currentTimeMillis() / 1000L) - 30L)
+        }
+        val reqMsg = JSONArray().put("REQ").put(subId).put(filter).toString()
+        bunkerRelays.forEach { raw ->
+            val norm = normalizeRelayUrl(raw)
+            if (norm.isNotBlank()) {
+                if (!sockets.containsKey(norm)) {
+                    connectRelay(norm, isEphemeralOutbox = true)
+                }
+                sockets[norm]?.send(reqMsg)
+            }
+        }
+        return subId
     }
 
     private fun handleRelayMessage(
@@ -489,16 +703,30 @@ class RelayPoolClient(
                         RelayPublishReceipt(
                             relayUrl = url,
                             accepted = accepted,
-                            message = msg.ifBlank { if (accepted) "OK" else "Rejected" }
+                            message = msg.ifBlank { if (accepted) "OK" else "Rejected" },
+                            stage = if (accepted) DeliveryVerificationStage.ACCEPTED else DeliveryVerificationStage.REJECTED
                         )
                     )
+                }
+                "AUTH" -> {
+                    val challenge = arr.optString(1)
+                    updateStatus(url) { prev ->
+                        (prev ?: RelayStatusInfo(url = url)).copy(
+                            authChallenge = challenge,
+                            lastMessage = "NIP-42 Auth challenge received"
+                        )
+                    }
                 }
                 "EOSE" -> {
                     val subId = arr.optString(1)
                     if (subId.startsWith("meta_") || subId.startsWith("disc_")) {
                         ws.send(JSONArray().put("CLOSE").put(subId).toString())
                     }
-                    queryEoseSignals[subId]?.complete(Unit)
+                    val counter = queryEoseCounts[subId]
+                    val target = queryTargetCounts[subId] ?: 1
+                    if (counter == null || counter.incrementAndGet() >= target) {
+                        queryEoseSignals[subId]?.complete(Unit)
+                    }
                 }
                 "NOTICE" -> {
                     if (!isEphemeralOutbox) {
@@ -555,11 +783,8 @@ class RelayPoolClient(
                         .put(NostrKinds.NSITE_NAMED)
                         .put(NostrKinds.NSITE_ROOT)
                         .put(NostrKinds.NSITE_LEGACY_FILE)
-                        .put(NostrKinds.NAPPLET_NAMED)
-                        .put(NostrKinds.NAPPLET_ROOT)
-                        .put(NostrKinds.NAPPLET_SNAPSHOT)
                 )
-                put("limit", 100)
+                put("limit", 120)
             }
 
             val metaAndOutboxFilter = JSONObject().apply {

@@ -1,6 +1,6 @@
 {
   "name": "SovereignShell",
-  "description": "Self-publishing Nostr napplet & nsite launcher shell with built-in signer, user profiles, NIP-01 notes, and relay management.",
+  "description": "Native Android NIP-5A Nsite launcher, multi-file editor, forker, and Blossom publisher with Nostr identity and adaptive relay networking.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

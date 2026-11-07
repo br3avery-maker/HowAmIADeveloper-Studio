@@ -490,6 +490,61 @@ object NostrCrypto {
         return encodeBech32("naddr", tlv)
     }
 
+    data class DecodedNaddr(
+        val kind: Int,
+        val pubkeyHex: String,
+        val dTag: String,
+        val relays: List<String> = emptyList()
+    )
+
+    /**
+     * Decodes a NIP-19 `naddr1...` Bech32 TLV coordinate into `(kind, pubkeyHex, dTag, relays)`.
+     */
+    fun decodeNaddr(rawInput: String): DecodedNaddr? = runCatching {
+        val cleaned = rawInput.trim()
+            .removePrefix("nostr:")
+            .removePrefix("NOSTR:")
+            .trim()
+        val (hrp, tlv) = decodeBech32(cleaned)
+        if (hrp != "naddr") return@runCatching null
+
+        var dTag: String? = null
+        var pubkeyHex: String? = null
+        var kind: Int? = null
+        val relays = mutableListOf<String>()
+
+        var pos = 0
+        while (pos + 2 <= tlv.size) {
+            val type = tlv[pos].toInt() and 0xFF
+            val len = tlv[pos + 1].toInt() and 0xFF
+            pos += 2
+            if (pos + len > tlv.size) break
+            val slice = tlv.copyOfRange(pos, pos + len)
+            when (type) {
+                0 -> dTag = String(slice, Charsets.UTF_8)
+                1 -> {
+                    val url = String(slice, Charsets.UTF_8).trim()
+                    if (url.startsWith("wss://", ignoreCase = true) || url.startsWith("ws://", ignoreCase = true)) {
+                        relays.add(url)
+                    }
+                }
+                2 -> if (len == 32) pubkeyHex = slice.toHex()
+                3 -> if (len == 4) {
+                    kind = ByteBuffer.wrap(slice).order(ByteOrder.BIG_ENDIAN).int
+                }
+            }
+            pos += len
+        }
+        val pk = pubkeyHex ?: return@runCatching null
+        val k = kind ?: return@runCatching null
+        DecodedNaddr(
+            kind = k,
+            pubkeyHex = pk.lowercase(),
+            dTag = dTag ?: "",
+            relays = relays.distinct()
+        )
+    }.getOrNull()
+
     fun encodeBech32(hrp: String, data: ByteArray): String {
         val words = convertBits(data, 8, 5, true)
         val checksum = createBech32Checksum(hrp, words)
