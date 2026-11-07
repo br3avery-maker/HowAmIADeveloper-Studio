@@ -2,11 +2,6 @@ package com.example.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -22,7 +17,6 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
@@ -41,15 +35,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.ViewList
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.automirrored.outlined.ViewList
 import androidx.compose.material.icons.filled.Clear
-import androidx.compose.material.icons.filled.DynamicFeed
+import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Shield
-import androidx.compose.material.icons.filled.ViewModule
+import androidx.compose.material.icons.filled.Security
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -58,9 +50,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -76,6 +66,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.data.DiscoveryDisplayMode
 import com.example.data.GalleryCategory
@@ -87,7 +78,6 @@ import com.example.data.StackedAppletGroup
 import com.example.nostr.ExternalSiteLauncher
 import com.example.nostr.NostrCrypto
 import com.example.nostr.NsiteSpamFilter
-import com.example.ui.theme.AmberSignal
 import com.example.ui.theme.BreBlack
 import com.example.ui.theme.BreDeepPink
 import com.example.ui.theme.BreGray100
@@ -96,7 +86,6 @@ import com.example.ui.theme.BreGray850
 import com.example.ui.theme.BreLightPink
 import com.example.ui.theme.BrePinkDark1
 import com.example.ui.theme.BrePinkDark2
-import com.example.ui.theme.BrePinkDark3
 import com.example.ui.theme.BreWhite
 import com.example.ui.theme.CyberMint
 import com.example.ui.theme.ObsidianBorder
@@ -104,25 +93,32 @@ import com.example.ui.theme.ObsidianCardGlass
 import com.example.ui.theme.ObsidianElevated
 import com.example.ui.theme.ZineBoneCream
 
+/**
+ * Deepink "CHAOS FEED" NIP-5A Nsite Discovery & Curated Gallery Screen:
+ * - Focused 100% on NIP-5A Nsites (zero NIP-5D Napplet tabs).
+ * - Accepts search queries, d-tags, creator handles, `npub1…`, `naddr1…`, or `nsite.lol` URLs.
+ * - Clean cards without raw protocol/dev clutter; tapping any group opens the editions/versions sheet.
+ */
 @Composable
 fun DiscoveryFeedScreen(
-    initialTabIsNsites: Boolean,
+    initialTabIsNsites: Boolean = true,
     initialPublisherPubkey: String? = null,
-    launcherPrefs: LauncherPrefs = LauncherPrefs(),
+    launcherPrefs: LauncherPrefs,
     publisherProfiles: Map<String, PublisherProfileEntity> = emptyMap(),
-    stackedGroups: List<StackedAppletGroup> = emptyList(),
+    stackedGroups: List<StackedAppletGroup>,
     catalogApplets: List<InstalledAppletEntity>,
-    localCuratedCount: Int = 0,
+    localCuratedCount: Int,
     spamShieldEnabled: Boolean = true,
     blockedSpamCount: Int = 0,
-    connectedRelays: Int = 0,
+    connectedRelays: Int,
     onLookupPublisher: (String) -> String? = { null },
-    onToggleViewMode: () -> Unit = {},
-    onToggleDiscoveryMode: () -> Unit = {},
+    onOpenManualAddress: (String) -> Unit = {},
+    onToggleViewMode: () -> Unit,
+    onToggleDiscoveryMode: () -> Unit,
     onToggleSpamShield: () -> Unit = {},
-    onRefreshCatalog: (silent: Boolean) -> Unit = {},
-    onToggleNip51Star: (InstalledAppletEntity) -> Unit = {},
-    onPublishNip51List: () -> Unit = {},
+    onRefreshCatalog: (Boolean) -> Unit = {},
+    onToggleNip51Star: (InstalledAppletEntity) -> Unit,
+    onPublishNip51List: () -> Unit,
     onInstallToggle: (InstalledAppletEntity, Boolean) -> Unit,
     onOpenApplet: (InstalledAppletEntity) -> Unit,
     onOpenAppletInApp: (InstalledAppletEntity) -> Unit = onOpenApplet,
@@ -136,114 +132,104 @@ fun DiscoveryFeedScreen(
         onRefreshCatalog(true)
     }
 
+    var searchQuery by rememberSaveable { mutableStateOf("") }
+    var activePublisherFilterPubkey by rememberSaveable(initialPublisherPubkey) {
+        mutableStateOf(initialPublisherPubkey?.lowercase())
+    }
     var selectedCategoryName by rememberSaveable {
-        mutableStateOf(
-            if (initialTabIsNsites) GalleryCategory.NSITES.name else GalleryCategory.ALL.name
-        )
+        mutableStateOf(GalleryCategory.ALL.name)
     }
     val selectedCategory = remember(selectedCategoryName) {
         runCatching { GalleryCategory.valueOf(selectedCategoryName) }.getOrDefault(GalleryCategory.ALL)
     }
+    var inspectedStackGroup by remember { mutableStateOf<StackedAppletGroup?>(null) }
 
-    var liveFeedTab by rememberSaveable { mutableIntStateOf(if (initialTabIsNsites) 1 else 0) }
-    var searchQuery by rememberSaveable { mutableStateOf("") }
-    var inspectedGroupId by rememberSaveable { mutableStateOf<String?>(null) }
-    var selectedPublisherPubkey by rememberSaveable(initialPublisherPubkey) {
-        mutableStateOf(initialPublisherPubkey?.trim()?.lowercase()?.takeIf { it.length == 64 })
-    }
-
-    val queryResolvedPubkeyHex = remember(searchQuery) {
-        NostrCrypto.resolvePubkeyHex(searchQuery)
-    }
-
-    LaunchedEffect(queryResolvedPubkeyHex) {
-        if (queryResolvedPubkeyHex != null) {
-            onLookupPublisher(queryResolvedPubkeyHex)
-        }
-    }
-
-    val activePublisherFilterHex = selectedPublisherPubkey ?: queryResolvedPubkeyHex
-
-    val selectPublisherAction: (String) -> Unit = { rawPk ->
-        val resolved = onLookupPublisher(rawPk) ?: NostrCrypto.resolvePubkeyHex(rawPk) ?: rawPk.lowercase()
-        if (resolved.length == 64) {
-            selectedPublisherPubkey = resolved
-        }
-    }
-
-    val activeInspectedGroup = remember(stackedGroups, inspectedGroupId) {
-        inspectedGroupId?.let { id ->
-            stackedGroups.firstOrNull { g ->
-                g.groupId == id || g.variants.any { v -> v.applet.appletId == id }
+    LaunchedEffect(searchQuery) {
+        val trimmed = searchQuery.trim()
+        if (trimmed.startsWith("npub1", ignoreCase = true) ||
+            trimmed.startsWith("nprofile1", ignoreCase = true) ||
+            (trimmed.length == 64 && trimmed.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' })
+        ) {
+            val resolved = onLookupPublisher(trimmed)
+            if (resolved != null) {
+                activePublisherFilterPubkey = resolved
             }
         }
     }
 
-    val featuredGroups by remember(stackedGroups) {
-        derivedStateOf { stackedGroups.filter { it.isFeatured } }
+    val queryLooksLikeDirectAddress = remember(searchQuery) {
+        val q = searchQuery.trim().lowercase()
+        q.startsWith("naddr1") || q.contains(".nsite.lol") || q.startsWith("https://") || q.startsWith("nostr:")
     }
 
-    val filteredGroups by remember(stackedGroups, selectedCategory, searchQuery, activePublisherFilterHex, publisherProfiles) {
-        derivedStateOf {
-            val q = searchQuery.trim()
-            stackedGroups.filter { group ->
-                val catMatch = selectedCategory in group.categories
-                val pubFilterMatch = activePublisherFilterHex == null || group.variants.any { v ->
-                    v.applet.authorPubkey.equals(activePublisherFilterHex, ignoreCase = true)
+    val filteredGroups = remember(
+        stackedGroups,
+        selectedCategory,
+        searchQuery,
+        activePublisherFilterPubkey,
+        publisherProfiles
+    ) {
+        val q = searchQuery.trim().lowercase()
+        val isKeyQuery = q.startsWith("npub1") || q.startsWith("nprofile1")
+        stackedGroups.filter { group ->
+            val matchesCat = selectedCategory == GalleryCategory.ALL ||
+                group.categories.contains(selectedCategory)
+            val matchesPublisherFilter = activePublisherFilterPubkey.isNullOrBlank() ||
+                group.variants.any { it.applet.authorPubkey.equals(activePublisherFilterPubkey, ignoreCase = true) }
+            val matchesQuery = q.isEmpty() || isKeyQuery ||
+                group.primary.title.lowercase().contains(q) ||
+                group.primary.description.lowercase().contains(q) ||
+                group.primary.dTag.lowercase().contains(q) ||
+                group.variants.any { v ->
+                    val prof = publisherProfiles[v.applet.authorPubkey.lowercase()]
+                    v.applet.authorNpub.lowercase().contains(q) ||
+                        (prof != null && (
+                            prof.displayName.lowercase().contains(q) ||
+                                prof.username.lowercase().contains(q) ||
+                                prof.nip05.lowercase().contains(q)
+                            ))
                 }
-                val queryMatch = q.isEmpty() || queryResolvedPubkeyHex != null || group.variants.any { v ->
-                    val app = v.applet
-                    val prof = publisherProfiles[app.authorPubkey.lowercase()]
-                    app.title.contains(q, ignoreCase = true) ||
-                        app.description.contains(q, ignoreCase = true) ||
-                        app.dTag.contains(q, ignoreCase = true) ||
-                        app.authorNpub.contains(q, ignoreCase = true) ||
-                        app.authorPubkey.contains(q, ignoreCase = true) ||
-                        prof?.displayName?.contains(q, ignoreCase = true) == true ||
-                        prof?.username?.contains(q, ignoreCase = true) == true ||
-                        prof?.nip05?.contains(q, ignoreCase = true) == true
-                }
-                catMatch && pubFilterMatch && queryMatch
-            }
+            matchesCat && matchesPublisherFilter && matchesQuery
         }
     }
 
-    val liveFeedItems by remember(catalogApplets, liveFeedTab, searchQuery, activePublisherFilterHex, publisherProfiles) {
-        derivedStateOf {
-            val wantNsite = liveFeedTab == 1
-            val q = searchQuery.trim()
-            catalogApplets
-                .filter { item ->
-                    val prof = publisherProfiles[item.authorPubkey.lowercase()]
-                    val pubFilterMatch = activePublisherFilterHex == null ||
-                        item.authorPubkey.equals(activePublisherFilterHex, ignoreCase = true)
-                    val queryMatch = q.isEmpty() || queryResolvedPubkeyHex != null ||
-                        item.title.contains(q, ignoreCase = true) ||
-                        item.description.contains(q, ignoreCase = true) ||
-                        item.dTag.contains(q, ignoreCase = true) ||
-                        item.authorNpub.contains(q, ignoreCase = true) ||
-                        item.authorPubkey.contains(q, ignoreCase = true) ||
-                        prof?.displayName?.contains(q, ignoreCase = true) == true ||
-                        prof?.username?.contains(q, ignoreCase = true) == true ||
-                        prof?.nip05?.contains(q, ignoreCase = true) == true
-                    item.isNsite == wantNsite && pubFilterMatch && queryMatch
-                }
-                .sortedByDescending { it.updatedAt }
-        }
+    val featuredGroups = remember(stackedGroups) {
+        stackedGroups.filter { it.isFeatured || it.isCuratedNip51 }
     }
 
-    val isGalleryMode = launcherPrefs.discoveryMode == DiscoveryDisplayMode.CURATED_GALLERY
+    val filteredLiveFeedItems = remember(
+        catalogApplets,
+        searchQuery,
+        activePublisherFilterPubkey,
+        publisherProfiles
+    ) {
+        val q = searchQuery.trim().lowercase()
+        val isKeyQuery = q.startsWith("npub1") || q.startsWith("nprofile1")
+        catalogApplets.filter { item ->
+            val prof = publisherProfiles[item.authorPubkey.lowercase()]
+            val matchesPub = activePublisherFilterPubkey.isNullOrBlank() ||
+                item.authorPubkey.equals(activePublisherFilterPubkey, ignoreCase = true)
+            val matchesQuery = q.isEmpty() || isKeyQuery ||
+                item.title.lowercase().contains(q) ||
+                item.description.lowercase().contains(q) ||
+                item.dTag.lowercase().contains(q) ||
+                item.authorNpub.lowercase().contains(q) ||
+                (prof != null && (
+                    prof.displayName.lowercase().contains(q) ||
+                        prof.username.lowercase().contains(q) ||
+                        prof.nip05.lowercase().contains(q)
+                    ))
+            matchesPub && matchesQuery
+        }
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        // 1. Same Custom Home Screen Wallpaper Layer for Seamless Launcher Continuity
-        LauncherWallpaperLayer(prefs = launcherPrefs, extraScrimBoost = 0.16f)
+        LauncherWallpaperLayer(prefs = launcherPrefs, extraScrimBoost = 0.24f)
 
-        // 2. Responsive Storefront / Gallery Foreground matching Home Screen
         BoxWithConstraints(
             modifier = Modifier
                 .fillMaxSize()
                 .windowInsetsPadding(WindowInsets.statusBars)
-                .windowInsetsPadding(WindowInsets.navigationBars)
         ) {
             val isWide = maxWidth >= 600.dp
             val gridColumns = if (isWide) 6 else 4
@@ -251,36 +237,99 @@ fun DiscoveryFeedScreen(
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .widthIn(max = 840.dp)
+                    .widthIn(max = 860.dp)
                     .align(Alignment.TopCenter)
                     .padding(horizontal = 14.dp, vertical = 8.dp)
             ) {
-                // Top Bar: Back + Single-Line Search + Grid/List Toggle + Gallery|Feed Mode + Publish
+                // 1. Deepink "CHAOS FEED" Header Bar
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Surface(
+                    IconButton(
                         onClick = onBack,
-                        shape = CircleShape,
-                        color = ObsidianCardGlass,
-                        border = BorderStroke(1.dp, BrePinkDark2),
                         modifier = Modifier
+                            .size(40.dp)
                             .minimumInteractiveComponentSize()
-                            .size(38.dp)
                             .testTag("discovery_back_button")
                     ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = stringResource(R.string.cd_back),
-                                tint = BreWhite,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = stringResource(R.string.cd_back),
+                            tint = ZineBoneCream
+                        )
                     }
 
+                    Text(
+                        text = "CHAOS FEED",
+                        style = MaterialTheme.typography.headlineSmall.copy(
+                            fontWeight = FontWeight.Black,
+                            letterSpacing = 1.4.sp
+                        ),
+                        color = ZineBoneCream,
+                        modifier = Modifier.weight(1f)
+                    )
+
+                    // Curated Gallery vs Live Stream toggle
+                    Surface(
+                        onClick = onToggleDiscoveryMode,
+                        shape = RoundedCornerShape(999.dp),
+                        color = BreGray850,
+                        border = BorderStroke(1.dp, BrePinkDark2),
+                        modifier = Modifier.testTag("discovery_mode_toggle")
+                    ) {
+                        Text(
+                            text = if (launcherPrefs.discoveryMode == DiscoveryDisplayMode.CURATED_GALLERY) {
+                                "CURATED"
+                            } else {
+                                "LIVE STREAM"
+                            },
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Black),
+                            color = BreLightPink,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                        )
+                    }
+
+                    IconButton(
+                        onClick = onToggleViewMode,
+                        modifier = Modifier
+                            .size(38.dp)
+                            .testTag("discovery_view_mode_toggle")
+                    ) {
+                        Icon(
+                            imageVector = if (launcherPrefs.viewMode == LauncherViewMode.ICON_GRID) {
+                                Icons.AutoMirrored.Outlined.ViewList
+                            } else {
+                                Icons.Default.GridView
+                            },
+                            contentDescription = "Toggle grid/list",
+                            tint = BreWhite
+                        )
+                    }
+
+                    IconButton(
+                        onClick = { onRefreshCatalog(false) },
+                        modifier = Modifier
+                            .size(38.dp)
+                            .testTag("discovery_refresh_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = "Sync Relays",
+                            tint = CyberMint
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // 2. Search Bar + Direct Address Launch Action
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
                     CompactSearchPill(
                         query = searchQuery,
                         onQueryChange = { searchQuery = it },
@@ -290,369 +339,262 @@ fun DiscoveryFeedScreen(
                             .testTag("discovery_search_input")
                     )
 
-                    if (isGalleryMode) {
-                        // Exact same Icon Grid / Specimen List Toggle as LauncherHomeScreen
+                    if (queryLooksLikeDirectAddress) {
                         Surface(
-                            onClick = onToggleViewMode,
-                            shape = CircleShape,
-                            color = ObsidianCardGlass,
-                            border = BorderStroke(1.dp, BrePinkDark2),
-                            modifier = Modifier
-                                .minimumInteractiveComponentSize()
-                                .size(38.dp)
-                                .testTag("discovery_view_mode_toggle")
+                            onClick = {
+                                val target = searchQuery.trim()
+                                searchQuery = ""
+                                onOpenManualAddress(target)
+                            },
+                            shape = RoundedCornerShape(999.dp),
+                            color = BreDeepPink
                         ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(
-                                    imageVector = if (launcherPrefs.viewMode == LauncherViewMode.ICON_GRID) {
-                                        Icons.AutoMirrored.Filled.ViewList
-                                    } else {
-                                        Icons.Default.ViewModule
-                                    },
-                                    contentDescription = stringResource(R.string.cd_toggle_launcher_view),
-                                    tint = BreLightPink,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            }
-                        }
-                    }
-
-                    // Toggle between Curated Gallery (default) & Optional Live Relay Feed
-                    Surface(
-                        onClick = onToggleDiscoveryMode,
-                        shape = RoundedCornerShape(999.dp),
-                        color = if (isGalleryMode) BrePinkDark3 else ObsidianCardGlass,
-                        border = BorderStroke(
-                            1.dp,
-                            if (isGalleryMode) BreDeepPink else ZineBoneCream.copy(alpha = 0.65f)
-                        ),
-                        modifier = Modifier
-                            .minimumInteractiveComponentSize()
-                            .height(38.dp)
-                            .testTag("discovery_mode_toggle")
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.padding(horizontal = 9.dp)
-                        ) {
-                            Icon(
-                                imageVector = if (isGalleryMode) Icons.Default.AutoAwesome else Icons.Default.DynamicFeed,
-                                contentDescription = "Switch between Curated Gallery and Live Relay Feed",
-                                tint = if (isGalleryMode) BreWhite else ZineBoneCream,
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
                             Text(
-                                text = if (isGalleryMode) "Gallery" else "Feed",
-                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
-                                color = if (isGalleryMode) BreWhite else ZineBoneCream,
-                                maxLines = 1,
-                                softWrap = false
+                                text = "OPEN URL >>>",
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Black),
+                                color = BreWhite,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp)
                             )
-                        }
-                    }
-
-                    Surface(
-                        onClick = onOpenCreatePublish,
-                        shape = RoundedCornerShape(999.dp),
-                        color = BreDeepPink,
-                        modifier = Modifier
-                            .minimumInteractiveComponentSize()
-                            .height(38.dp)
-                            .testTag("discovery_publish_button")
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.padding(horizontal = 10.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Add,
-                                contentDescription = "Publish new Napplet or Nsite",
-                                tint = BreWhite,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            if (isWide) {
-                                Spacer(modifier = Modifier.width(3.dp))
-                                Text(
-                                    text = "Publish",
-                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
-                                    color = BreWhite,
-                                    maxLines = 1,
-                                    softWrap = false
-                                )
-                            }
                         }
                     }
                 }
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                val featuredCreatorHex = NostrCrypto.DEFAULT_FEATURED_CREATOR_PUBKEY_HEX
-                val featuredCreatorProfile = publisherProfiles[featuredCreatorHex]
-                val isFeaturedCreatorFiltered = activePublisherFilterHex?.equals(featuredCreatorHex, ignoreCase = true) == true
+                // 3. Category Pills + Spam Shield
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("gallery_category_row")
+                ) {
+                    items(GalleryCategory.entries, key = { it.name }) { category ->
+                        val isSelected = selectedCategory == category
+                        FilterChip(
+                            selected = isSelected,
+                            onClick = { selectedCategoryName = category.name },
+                            label = {
+                                Text(
+                                    text = "${category.glyph} ${category.label}",
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            },
+                            modifier = Modifier.testTag(
+                                if (category == GalleryCategory.NSITES) "tab_nsites" else "cat_${category.name.lowercase()}"
+                            )
+                        )
+                    }
 
-                // Telemetry & Curation Status Strip (Featured Creator + Spam Shield + NIP-51 Sync + Relay Refresh)
-                GalleryStatusStrip(
-                    isGalleryMode = isGalleryMode,
-                    stackedCount = stackedGroups.size,
-                    totalRawCleaned = catalogApplets.size,
-                    localCuratedCount = localCuratedCount,
-                    spamShieldEnabled = spamShieldEnabled,
-                    blockedSpamCount = blockedSpamCount,
-                    connectedRelays = connectedRelays,
-                    featuredCreatorLabel = featuredCreatorProfile?.takeIf { it.hasResolvedIdentity }?.bestName
-                        ?: "Creator Nsites",
-                    isFeaturedCreatorSelected = isFeaturedCreatorFiltered,
-                    onToggleFeaturedCreator = {
-                        if (isFeaturedCreatorFiltered) {
-                            selectedPublisherPubkey = null
-                            if (queryResolvedPubkeyHex != null) searchQuery = ""
-                        } else if (featuredCreatorHex.length == 64) {
-                            selectPublisherAction(featuredCreatorHex)
-                        }
-                    },
-                    onToggleSpamShield = onToggleSpamShield,
-                    onPublishNip51List = onPublishNip51List,
-                    onRefresh = { onRefreshCatalog(false) }
-                )
+                    item {
+                        FilterChip(
+                            selected = spamShieldEnabled,
+                            onClick = onToggleSpamShield,
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Default.Security,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                            },
+                            label = {
+                                Text(
+                                    text = if (blockedSpamCount > 0) "Shield ($blockedSpamCount)" else "Shield",
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            },
+                            modifier = Modifier.testTag("spam_shield_chip")
+                        )
+                    }
+                }
 
-                if (activePublisherFilterHex != null) {
+                // Active Publisher Spotlight Banner (when filtering by creator)
+                if (!activePublisherFilterPubkey.isNullOrBlank()) {
+                    val pubKey = activePublisherFilterPubkey!!
+                    val prof = publisherProfiles[pubKey.lowercase()]
+                    val pubNpub = prof?.npub ?: runCatching { NostrCrypto.encodeNpub(pubKey) }.getOrDefault(pubKey)
                     Spacer(modifier = Modifier.height(8.dp))
-                    val pubProfile = publisherProfiles[activePublisherFilterHex]
-                    val fallbackNpub = remember(activePublisherFilterHex) {
-                        runCatching { NostrCrypto.encodeNpub(activePublisherFilterHex) }.getOrDefault(activePublisherFilterHex)
-                    }
-                    val authorAppsCount = remember(catalogApplets, activePublisherFilterHex) {
-                        catalogApplets.count { it.authorPubkey.equals(activePublisherFilterHex, ignoreCase = true) }
-                    }
                     PublisherProfileCard(
-                        profile = pubProfile,
-                        authorPubkey = activePublisherFilterHex,
-                        authorNpub = fallbackNpub,
-                        appCount = authorAppsCount,
+                        profile = prof,
+                        authorPubkey = pubKey,
+                        authorNpub = pubNpub,
+                        appCount = filteredGroups.size,
                         onClearFilter = {
-                            selectedPublisherPubkey = null
-                            if (queryResolvedPubkeyHex != null) searchQuery = ""
+                            activePublisherFilterPubkey = null
+                            if (searchQuery.startsWith("npub1", ignoreCase = true)) {
+                                searchQuery = ""
+                            }
                         }
                     )
                 }
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // Main Body: Curated Storefront Gallery (Default) vs Optional Chronological Live Feed
-                AnimatedContent(
-                    targetState = isGalleryMode,
-                    transitionSpec = {
-                        fadeIn(spring(stiffness = Spring.StiffnessMediumLow)) togetherWith
-                            fadeOut(spring(stiffness = Spring.StiffnessMedium))
-                    },
-                    label = "gallery_vs_feed_switch",
-                    modifier = Modifier.weight(1f)
-                ) { galleryActive ->
-                    if (galleryActive) {
-                        Column(modifier = Modifier.fillMaxSize()) {
-                            // Curated Category & NIP-51 Filter Chips
-                            LazyRow(
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                contentPadding = PaddingValues(horizontal = 2.dp),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("gallery_category_row")
-                            ) {
-                                items(GalleryCategory.entries, key = { it.name }) { category ->
-                                    val count = stackedGroups.count { category in it.categories }
-                                    val selected = selectedCategory == category
-                                    val chipTag = when (category) {
-                                        GalleryCategory.NAPPLETS -> "tab_napplets"
-                                        GalleryCategory.NSITES -> "tab_nsites"
-                                        else -> "category_chip_${category.name.lowercase()}"
-                                    }
-                                    Surface(
-                                        onClick = { selectedCategoryName = category.name },
-                                        shape = RoundedCornerShape(999.dp),
-                                        color = if (selected) BreDeepPink else BreGray850.copy(alpha = 0.90f),
-                                        border = BorderStroke(
-                                            1.dp,
-                                            if (selected) BreLightPink else ObsidianBorder
-                                        ),
-                                        modifier = Modifier.testTag(chipTag)
+                // 4. Main Gallery or Live Feed Body
+                Box(modifier = Modifier.weight(1f)) {
+                    AnimatedContent(
+                        targetState = launcherPrefs.discoveryMode,
+                        label = "discovery_mode_content"
+                    ) { mode ->
+                        when (mode) {
+                            DiscoveryDisplayMode.CURATED_GALLERY -> {
+                                if (filteredGroups.isEmpty()) {
+                                    EmptyDiscoveryState(
+                                        isSearchActive = searchQuery.isNotBlank() ||
+                                            selectedCategory != GalleryCategory.ALL ||
+                                            !activePublisherFilterPubkey.isNullOrBlank(),
+                                        emptyTitle = if (selectedCategory == GalleryCategory.NIP51_CURATED) {
+                                            "No Curated Nsites Yet"
+                                        } else {
+                                            "No Matching Nsites"
+                                        },
+                                        emptySubtitle = "Try clearing your filter or paste an nsite.lol / naddr1 address above.",
+                                        onResetFilter = {
+                                            searchQuery = ""
+                                            selectedCategoryName = GalleryCategory.ALL.name
+                                            activePublisherFilterPubkey = null
+                                        },
+                                        onRefresh = { onRefreshCatalog(false) }
+                                    )
+                                } else if (launcherPrefs.viewMode == LauncherViewMode.ICON_GRID) {
+                                    LazyVerticalGrid(
+                                        columns = GridCells.Fixed(gridColumns),
+                                        contentPadding = PaddingValues(bottom = 18.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                        verticalArrangement = Arrangement.spacedBy(14.dp),
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .testTag("gallery_icon_grid")
                                     ) {
-                                        Text(
-                                            text = "${category.glyph} ${category.label} ($count)",
-                                            style = MaterialTheme.typography.labelMedium.copy(
-                                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
-                                            ),
-                                            color = if (selected) BreWhite else BreGray100,
-                                            maxLines = 1,
-                                            softWrap = false,
-                                            modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp)
-                                        )
+                                        if ((selectedCategory == GalleryCategory.ALL || selectedCategory == GalleryCategory.FEATURED) &&
+                                            searchQuery.isBlank() &&
+                                            activePublisherFilterPubkey.isNullOrBlank() &&
+                                            featuredGroups.isNotEmpty()
+                                        ) {
+                                            item(span = { GridItemSpan(maxLineSpan) }) {
+                                                FeaturedSpotlightCarousel(
+                                                    featuredGroups = featuredGroups,
+                                                    publisherProfiles = publisherProfiles,
+                                                    onSelectPublisher = { pk ->
+                                                        onLookupPublisher(pk)
+                                                        activePublisherFilterPubkey = pk
+                                                    },
+                                                    onSelectGroup = { grp -> inspectedStackGroup = grp }
+                                                )
+                                            }
+                                        }
+
+                                        items(filteredGroups, key = { it.groupId }) { group ->
+                                            StackedGalleryGridTile(
+                                                group = group,
+                                                publisherProfile = publisherProfiles[group.primary.authorPubkey.lowercase()],
+                                                onSelectGroup = { inspectedStackGroup = group },
+                                                onQuickLaunchPrimary = { onOpenApplet(group.primary) }
+                                            )
+                                        }
+                                    }
+                                } else {
+                                    LazyColumn(
+                                        contentPadding = PaddingValues(bottom = 18.dp),
+                                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .testTag("gallery_list_column")
+                                    ) {
+                                        if ((selectedCategory == GalleryCategory.ALL || selectedCategory == GalleryCategory.FEATURED) &&
+                                            searchQuery.isBlank() &&
+                                            activePublisherFilterPubkey.isNullOrBlank() &&
+                                            featuredGroups.isNotEmpty()
+                                        ) {
+                                            item {
+                                                FeaturedSpotlightCarousel(
+                                                    featuredGroups = featuredGroups,
+                                                    publisherProfiles = publisherProfiles,
+                                                    onSelectPublisher = { pk ->
+                                                        onLookupPublisher(pk)
+                                                        activePublisherFilterPubkey = pk
+                                                    },
+                                                    onSelectGroup = { grp -> inspectedStackGroup = grp }
+                                                )
+                                            }
+                                        }
+
+                                        items(filteredGroups, key = { it.groupId }) { group ->
+                                            StackedGalleryListCard(
+                                                group = group,
+                                                publisherProfile = publisherProfiles[group.primary.authorPubkey.lowercase()],
+                                                openNsitesExternally = launcherPrefs.openNsitesExternally,
+                                                onSelectPublisher = { pk ->
+                                                    onLookupPublisher(pk)
+                                                    activePublisherFilterPubkey = pk
+                                                },
+                                                onSelectGroup = { inspectedStackGroup = group },
+                                                onQuickInstallOrOpen = {
+                                                    if (group.primary.isInstalled) {
+                                                        onOpenApplet(group.primary)
+                                                    } else {
+                                                        onInstallToggle(group.primary, true)
+                                                    }
+                                                }
+                                            )
+                                        }
                                     }
                                 }
                             }
 
-                            Spacer(modifier = Modifier.height(10.dp))
-
-                            if (filteredGroups.isEmpty()) {
-                                EmptyDiscoveryState(
-                                    isSearchActive = searchQuery.isNotBlank() ||
-                                        selectedCategory != GalleryCategory.ALL ||
-                                        activePublisherFilterHex != null,
-                                    emptyTitle = when {
-                                        activePublisherFilterHex != null -> "Querying publisher Nsites & Kind 0…"
-                                        selectedCategory == GalleryCategory.NIP51_CURATED -> "No NIP-51 Curated Apps Yet"
-                                        else -> "No matching gallery apps"
-                                    },
-                                    emptySubtitle = when {
-                                        activePublisherFilterHex != null ->
-                                            "Connected relays and NIP-65 outbox relays are being queried for manifests signed by ${PublisherProfileEntity.shortNpub(runCatching { NostrCrypto.encodeNpub(activePublisherFilterHex) }.getOrDefault(activePublisherFilterHex))}."
-                                        selectedCategory == GalleryCategory.NIP51_CURATED ->
-                                            "Tap any app tile and press the NIP-51 bookmark button to build & sign your own Kind 30003 curated gallery list."
-                                        else ->
-                                            "Clear filters or sync connected relays to pull live NIP-5D & NIP-5A manifests."
-                                    },
-                                    onResetFilter = {
-                                        searchQuery = ""
-                                        selectedPublisherPubkey = null
-                                        selectedCategoryName = GalleryCategory.ALL.name
-                                    },
-                                    onRefresh = { onRefreshCatalog(false) }
-                                )
-                            } else {
-                                val showSpotlight = searchQuery.isBlank() &&
-                                    activePublisherFilterHex == null &&
-                                    (selectedCategory == GalleryCategory.ALL || selectedCategory == GalleryCategory.FEATURED) &&
-                                    featuredGroups.isNotEmpty()
-
-                                AnimatedContent(
-                                    targetState = launcherPrefs.viewMode,
-                                    transitionSpec = {
-                                        fadeIn(spring(stiffness = Spring.StiffnessMediumLow)) togetherWith
-                                            fadeOut(spring(stiffness = Spring.StiffnessMedium))
-                                    },
-                                    label = "gallery_grid_vs_list",
-                                    modifier = Modifier.fillMaxSize()
-                                ) { mode ->
-                                    when (mode) {
-                                        LauncherViewMode.ICON_GRID -> {
-                                            LazyVerticalGrid(
-                                                columns = GridCells.Fixed(gridColumns),
-                                                contentPadding = PaddingValues(bottom = 20.dp),
-                                                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                                verticalArrangement = Arrangement.spacedBy(16.dp),
-                                                modifier = Modifier
-                                                    .fillMaxSize()
-                                                    .testTag("gallery_icon_grid")
-                                            ) {
-                                                if (showSpotlight) {
-                                                    item(
-                                                        key = "spotlight_header",
-                                                        span = { GridItemSpan(maxLineSpan) }
-                                                    ) {
-                                                        Column {
-                                                            FeaturedSpotlightCarousel(
-                                                                featuredGroups = featuredGroups,
-                                                                publisherProfiles = publisherProfiles,
-                                                                onSelectPublisher = selectPublisherAction,
-                                                                onSelectGroup = { inspectedGroupId = it.groupId }
-                                                            )
-                                                            Spacer(modifier = Modifier.height(6.dp))
-                                                            Text(
-                                                                text = "STACKED GALLERY • TAP TILE FOR EDITIONS, LONG-PRESS TO OPEN",
-                                                                style = MaterialTheme.typography.labelSmall,
-                                                                color = ZineBoneCream.copy(alpha = 0.72f),
-                                                                modifier = Modifier.padding(horizontal = 2.dp)
-                                                            )
-                                                        }
-                                                    }
-                                                }
-
-                                                items(filteredGroups, key = { it.groupId }) { group ->
-                                                    StackedGalleryGridTile(
-                                                        group = group,
-                                                        publisherProfile = publisherProfiles[group.primary.authorPubkey.lowercase()],
-                                                        onSelectGroup = { inspectedGroupId = group.groupId },
-                                                        onQuickLaunchPrimary = { onOpenApplet(group.primary) }
-                                                    )
-                                                }
-                                            }
-                                        }
-
-                                        LauncherViewMode.DESCRIPTION_LIST -> {
-                                            LazyColumn(
-                                                contentPadding = PaddingValues(bottom = 20.dp),
-                                                verticalArrangement = Arrangement.spacedBy(12.dp),
-                                                modifier = Modifier
-                                                    .fillMaxSize()
-                                                    .testTag("gallery_description_list")
-                                            ) {
-                                                if (showSpotlight) {
-                                                    item(key = "spotlight_list_header") {
-                                                        FeaturedSpotlightCarousel(
-                                                            featuredGroups = featuredGroups,
-                                                            publisherProfiles = publisherProfiles,
-                                                            onSelectPublisher = selectPublisherAction,
-                                                            onSelectGroup = { inspectedGroupId = it.groupId }
-                                                        )
-                                                    }
-                                                }
-
-                                                items(filteredGroups, key = { it.groupId }) { group ->
-                                                    StackedGalleryListCard(
-                                                        group = group,
-                                                        publisherProfile = publisherProfiles[group.primary.authorPubkey.lowercase()],
-                                                        openNsitesExternally = launcherPrefs.openNsitesExternally,
-                                                        onSelectPublisher = selectPublisherAction,
-                                                        onSelectGroup = { inspectedGroupId = group.groupId },
-                                                        onQuickInstallOrOpen = {
-                                                            if (group.primary.isInstalled) {
-                                                                onOpenApplet(group.primary)
-                                                            } else {
-                                                                onInstallToggle(group.primary, true)
-                                                            }
-                                                        }
-                                                    )
-                                                }
-                                            }
+                            DiscoveryDisplayMode.LIVE_FEED -> {
+                                if (filteredLiveFeedItems.isEmpty()) {
+                                    EmptyDiscoveryState(
+                                        isSearchActive = searchQuery.isNotBlank() || !activePublisherFilterPubkey.isNullOrBlank(),
+                                        emptyTitle = "Listening for Live Nsites…",
+                                        emptySubtitle = "Real-time stream of NIP-5A Nsite manifests arriving from your relay pool.",
+                                        onResetFilter = {
+                                            searchQuery = ""
+                                            activePublisherFilterPubkey = null
+                                        },
+                                        onRefresh = { onRefreshCatalog(false) }
+                                    )
+                                } else {
+                                    LazyColumn(
+                                        contentPadding = PaddingValues(bottom = 16.dp),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .testTag("discovery_feed_list")
+                                    ) {
+                                        items(filteredLiveFeedItems, key = { it.appletId }) { item ->
+                                            LiveFeedCatalogCard(
+                                                applet = item,
+                                                publisherProfile = publisherProfiles[item.authorPubkey.lowercase()],
+                                                openNsitesExternally = launcherPrefs.openNsitesExternally,
+                                                onSelectPublisher = { pk ->
+                                                    onLookupPublisher(pk)
+                                                    activePublisherFilterPubkey = pk
+                                                },
+                                                onInstallToggle = { onInstallToggle(item, !item.isInstalled) },
+                                                onOpen = { onOpenApplet(item) },
+                                                onFork = { onForkToStudio(item) }
+                                            )
                                         }
                                     }
                                 }
                             }
                         }
-                    } else {
-                        // Optional Raw Chronological Live Relay Feed
-                        LiveRelayStreamPanel(
-                            selectedTab = liveFeedTab,
-                            onSelectTab = { liveFeedTab = it },
-                            nappletCount = catalogApplets.count { !it.isNsite },
-                            nsiteCount = catalogApplets.count { it.isNsite },
-                            items = liveFeedItems,
-                            publisherProfiles = publisherProfiles,
-                            openNsitesExternally = launcherPrefs.openNsitesExternally,
-                            isSearchActive = searchQuery.isNotBlank() || activePublisherFilterHex != null,
-                            onClearSearch = {
-                                searchQuery = ""
-                                selectedPublisherPubkey = null
-                            },
-                            onRefresh = { onRefreshCatalog(false) },
-                            onSelectPublisher = selectPublisherAction,
-                            onInstallToggle = onInstallToggle,
-                            onOpenApplet = onOpenApplet,
-                            onForkToStudio = onForkToStudio
-                        )
                     }
                 }
             }
         }
 
-        // Storefront & Stacked Version/Clone Picker Bottom Sheet
-        if (activeInspectedGroup != null) {
+        val activeGroup = inspectedStackGroup
+        if (activeGroup != null) {
             StorefrontVersionPickerSheet(
-                group = activeInspectedGroup,
+                group = activeGroup,
                 publisherProfiles = publisherProfiles,
                 openNsitesExternally = launcherPrefs.openNsitesExternally,
-                onSelectPublisher = selectPublisherAction,
-                onDismiss = { inspectedGroupId = null },
+                onSelectPublisher = { pk ->
+                    onLookupPublisher(pk)
+                    activePublisherFilterPubkey = pk
+                },
+                onDismiss = { inspectedStackGroup = null },
                 onInstallToggle = onInstallToggle,
                 onOpenApplet = onOpenApplet,
                 onOpenInApp = onOpenAppletInApp,
@@ -660,245 +602,6 @@ fun DiscoveryFeedScreen(
                 onToggleNip51Star = onToggleNip51Star,
                 onPublishNip51List = onPublishNip51List
             )
-        }
-    }
-}
-
-@Composable
-private fun GalleryStatusStrip(
-    isGalleryMode: Boolean,
-    stackedCount: Int,
-    totalRawCleaned: Int,
-    localCuratedCount: Int,
-    spamShieldEnabled: Boolean,
-    blockedSpamCount: Int,
-    connectedRelays: Int,
-    featuredCreatorLabel: String,
-    isFeaturedCreatorSelected: Boolean,
-    onToggleFeaturedCreator: () -> Unit,
-    onToggleSpamShield: () -> Unit,
-    onPublishNip51List: () -> Unit,
-    onRefresh: () -> Unit
-) {
-    val collapsedClones = (totalRawCleaned - stackedCount).coerceAtLeast(0)
-
-    LazyRow(
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        item {
-            Surface(
-                onClick = onToggleFeaturedCreator,
-                shape = RoundedCornerShape(999.dp),
-                color = if (isFeaturedCreatorSelected) BreDeepPink else BrePinkDark3.copy(alpha = 0.72f),
-                border = BorderStroke(
-                    1.dp,
-                    if (isFeaturedCreatorSelected) BreWhite else BreDeepPink
-                ),
-                modifier = Modifier.testTag("featured_creator_filter_chip")
-            ) {
-                Text(
-                    text = "☆ $featuredCreatorLabel",
-                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                    color = BreWhite,
-                    maxLines = 1,
-                    softWrap = false,
-                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
-                )
-            }
-        }
-        item {
-            Surface(
-                onClick = onToggleSpamShield,
-                shape = RoundedCornerShape(999.dp),
-                color = if (spamShieldEnabled) Color(0xFF12241C) else ObsidianCardGlass,
-                border = BorderStroke(
-                    1.dp,
-                    if (spamShieldEnabled) CyberMint.copy(alpha = 0.55f) else ObsidianBorder
-                ),
-                modifier = Modifier.testTag("spam_shield_toggle")
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Shield,
-                        contentDescription = "Toggle spam bot filter",
-                        tint = if (spamShieldEnabled) CyberMint else BreGray100,
-                        modifier = Modifier.size(13.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = when {
-                            !spamShieldEnabled -> "Spam Shield: OFF"
-                            blockedSpamCount > 0 -> "Shield • $blockedSpamCount bots hidden"
-                            else -> "Spam Shield: ON"
-                        },
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (spamShieldEnabled) CyberMint else BreGray100,
-                        maxLines = 1,
-                        softWrap = false
-                    )
-                }
-            }
-        }
-
-        if (isGalleryMode && collapsedClones > 0) {
-            item {
-                Surface(
-                    shape = RoundedCornerShape(999.dp),
-                    color = BrePinkDark3.copy(alpha = 0.78f),
-                    border = BorderStroke(1.dp, BrePinkDark1)
-                ) {
-                    Text(
-                        text = "Stacked $collapsedClones clones/versions",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = BreLightPink,
-                        maxLines = 1,
-                        softWrap = false,
-                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
-                    )
-                }
-            }
-        }
-
-        if (localCuratedCount > 0) {
-            item {
-                Surface(
-                    onClick = onPublishNip51List,
-                    shape = RoundedCornerShape(999.dp),
-                    color = Color(0xFF28200B),
-                    border = BorderStroke(1.dp, AmberSignal.copy(alpha = 0.65f)),
-                    modifier = Modifier.testTag("strip_publish_nip51_button")
-                ) {
-                    Text(
-                        text = "★ Sync NIP-51 ($localCuratedCount)",
-                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                        color = AmberSignal,
-                        maxLines = 1,
-                        softWrap = false,
-                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
-                    )
-                }
-            }
-        }
-
-        item {
-            Surface(
-                onClick = onRefresh,
-                shape = RoundedCornerShape(999.dp),
-                color = ObsidianCardGlass,
-                border = BorderStroke(1.dp, ObsidianBorder),
-                modifier = Modifier.testTag("discovery_refresh_button")
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Refresh,
-                        contentDescription = "Refresh manifests from relays",
-                        tint = BreLightPink,
-                        modifier = Modifier.size(13.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = if (connectedRelays > 0) "Sync ($connectedRelays)" else "Sync Relays",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = BreLightPink,
-                        maxLines = 1,
-                        softWrap = false
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun LiveRelayStreamPanel(
-    selectedTab: Int,
-    onSelectTab: (Int) -> Unit,
-    nappletCount: Int,
-    nsiteCount: Int,
-    items: List<InstalledAppletEntity>,
-    publisherProfiles: Map<String, PublisherProfileEntity>,
-    openNsitesExternally: Boolean,
-    isSearchActive: Boolean,
-    onClearSearch: () -> Unit,
-    onRefresh: () -> Unit,
-    onSelectPublisher: (String) -> Unit,
-    onInstallToggle: (InstalledAppletEntity, Boolean) -> Unit,
-    onOpenApplet: (InstalledAppletEntity) -> Unit,
-    onForkToStudio: (InstalledAppletEntity) -> Unit
-) {
-    Column(modifier = Modifier.fillMaxSize()) {
-        Surface(
-            shape = RoundedCornerShape(12.dp),
-            color = ObsidianCardGlass,
-            border = BorderStroke(1.dp, ObsidianBorder),
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(36.dp)
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(3.dp),
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                CompactSegmentTab(
-                    selected = selectedTab == 0,
-                    label = "${stringResource(R.string.tab_napplets)} ($nappletCount)",
-                    onClick = { onSelectTab(0) },
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("tab_napplets")
-                )
-                CompactSegmentTab(
-                    selected = selectedTab == 1,
-                    label = "${stringResource(R.string.tab_nsites)} ($nsiteCount)",
-                    onClick = { onSelectTab(1) },
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("tab_nsites")
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        if (items.isEmpty()) {
-            EmptyDiscoveryState(
-                isSearchActive = isSearchActive,
-                emptyTitle = if (isSearchActive) "No matching feed events" else "Listening for live manifests…",
-                emptySubtitle = "Unstacked chronological stream of NIP-5D & NIP-5A manifests arriving from your relay pool.",
-                onResetFilter = onClearSearch,
-                onRefresh = onRefresh
-            )
-        } else {
-            LazyColumn(
-                contentPadding = PaddingValues(bottom = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .testTag("discovery_feed_list")
-            ) {
-                items(items, key = { it.appletId }) { item ->
-                    LiveFeedCatalogCard(
-                        applet = item,
-                        publisherProfile = publisherProfiles[item.authorPubkey.lowercase()],
-                        openNsitesExternally = openNsitesExternally,
-                        onSelectPublisher = onSelectPublisher,
-                        onInstallToggle = { onInstallToggle(item, !item.isInstalled) },
-                        onOpen = { onOpenApplet(item) },
-                        onFork = { onForkToStudio(item) }
-                    )
-                }
-            }
         }
     }
 }
@@ -914,13 +617,13 @@ private fun CompactSearchPill(
         shape = RoundedCornerShape(999.dp),
         color = ObsidianCardGlass,
         border = BorderStroke(1.dp, BrePinkDark2),
-        modifier = modifier.height(38.dp)
+        modifier = modifier.height(40.dp)
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 11.dp)
+                .padding(horizontal = 12.dp)
         ) {
             Icon(
                 imageVector = Icons.Default.Search,
@@ -928,7 +631,7 @@ private fun CompactSearchPill(
                 tint = BreLightPink,
                 modifier = Modifier.size(16.dp)
             )
-            Spacer(modifier = Modifier.width(6.dp))
+            Spacer(modifier = Modifier.width(8.dp))
             Box(
                 contentAlignment = Alignment.CenterStart,
                 modifier = Modifier.weight(1f)
@@ -969,33 +672,6 @@ private fun CompactSearchPill(
 }
 
 @Composable
-private fun CompactSegmentTab(
-    selected: Boolean,
-    label: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Surface(
-        onClick = onClick,
-        shape = RoundedCornerShape(9.dp),
-        color = if (selected) BreDeepPink else Color.Transparent,
-        modifier = modifier.fillMaxHeight()
-    ) {
-        Box(contentAlignment = Alignment.Center) {
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelMedium.copy(
-                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
-                ),
-                color = if (selected) BreWhite else BreGray100,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-    }
-}
-
-@Composable
 private fun LiveFeedCatalogCard(
     applet: InstalledAppletEntity,
     publisherProfile: PublisherProfileEntity?,
@@ -1013,7 +689,7 @@ private fun LiveFeedCatalogCard(
     }
 
     Surface(
-        shape = RoundedCornerShape(14.dp),
+        shape = RoundedCornerShape(16.dp),
         color = BreGray850.copy(alpha = 0.94f),
         border = BorderStroke(1.dp, ObsidianBorder),
         modifier = Modifier
@@ -1027,14 +703,10 @@ private fun LiveFeedCatalogCard(
             ) {
                 Box(
                     modifier = Modifier
-                        .size(38.dp)
+                        .size(40.dp)
                         .clip(RoundedCornerShape(10.dp))
                         .background(BreBlack)
-                        .border(
-                            1.dp,
-                            if (applet.isNsite) Color(0xFF3E3529) else BrePinkDark2,
-                            RoundedCornerShape(10.dp)
-                        ),
+                        .border(1.dp, BrePinkDark2, RoundedCornerShape(10.dp)),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
@@ -1059,7 +731,17 @@ private fun LiveFeedCatalogCard(
                             modifier = Modifier.weight(1f)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
-                        ProtocolBadgePill(isNsite = applet.isNsite, nip07 = applet.enableNip07)
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = ZineBoneCream
+                        ) {
+                            Text(
+                                text = if (applet.isInstalled) "PINNED" else "ONLINE",
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Black),
+                                color = BreBlack,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
                     }
 
                     Spacer(modifier = Modifier.height(3.dp))
@@ -1068,7 +750,7 @@ private fun LiveFeedCatalogCard(
                         profile = publisherProfile,
                         authorPubkey = applet.authorPubkey,
                         authorNpub = applet.authorNpub,
-                        dTag = applet.dTag,
+                        dTag = null,
                         onClickPublisher = onSelectPublisher
                     )
                 }
@@ -1088,18 +770,10 @@ private fun LiveFeedCatalogCard(
             Spacer(modifier = Modifier.height(8.dp))
 
             Row(
-                horizontalArrangement = Arrangement.SpaceBetween,
+                horizontalArrangement = Arrangement.End,
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text(
-                    text = "Kind ${applet.kind}" + if (applet.isInstalled) " • Pinned" else "",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (applet.isInstalled) CyberMint else BreGray600,
-                    maxLines = 1,
-                    softWrap = false
-                )
-
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
@@ -1110,7 +784,7 @@ private fun LiveFeedCatalogCard(
                         ExternalSiteLauncher.resolveExternalUrl(applet) != null
 
                     CompactFeedPill(
-                        label = "Fork",
+                        label = "FORK",
                         filled = false,
                         outlined = false,
                         onClick = onFork,
@@ -1118,14 +792,13 @@ private fun LiveFeedCatalogCard(
                     )
                     if (applet.isInstalled) {
                         CompactFeedPill(
-                            label = "Unpin",
+                            label = "UNPIN",
                             filled = false,
                             outlined = true,
                             onClick = onInstallToggle
                         )
                         CompactFeedPill(
-                            label = stringResource(R.string.action_installed_open) +
-                                if (opensExternally) " ↗" else "",
+                            label = if (opensExternally) "LAUNCH ↗" else "LAUNCH >>>",
                             filled = true,
                             outlined = false,
                             onClick = onOpen,
@@ -1133,14 +806,14 @@ private fun LiveFeedCatalogCard(
                         )
                     } else {
                         CompactFeedPill(
-                            label = if (opensExternally) "Open ↗" else "Preview",
+                            label = if (opensExternally) "OPEN ↗" else "PREVIEW",
                             filled = false,
                             outlined = true,
                             onClick = onOpen,
                             modifier = Modifier.testTag("preview_applet_${applet.dTag}")
                         )
                         CompactFeedPill(
-                            label = stringResource(R.string.action_install),
+                            label = "INSTALL >>>",
                             filled = true,
                             outlined = false,
                             onClick = onInstallToggle,
@@ -1163,7 +836,7 @@ private fun CompactFeedPill(
 ) {
     Surface(
         onClick = onClick,
-        shape = RoundedCornerShape(999.dp),
+        shape = RoundedCornerShape(8.dp),
         color = when {
             filled -> BreDeepPink
             outlined -> BreBlack
@@ -1174,11 +847,11 @@ private fun CompactFeedPill(
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Black),
             color = if (filled) BreWhite else BreLightPink,
             maxLines = 1,
             softWrap = false,
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
         )
     }
 }
@@ -1206,8 +879,8 @@ private fun EmptyDiscoveryState(
         ) {
             Text(
                 text = emptyTitle,
-                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                color = BreWhite,
+                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Black),
+                color = ZineBoneCream,
                 textAlign = TextAlign.Center
             )
             Spacer(modifier = Modifier.height(6.dp))
@@ -1220,14 +893,14 @@ private fun EmptyDiscoveryState(
             Spacer(modifier = Modifier.height(14.dp))
             Surface(
                 onClick = if (isSearchActive) onResetFilter else onRefresh,
-                shape = RoundedCornerShape(999.dp),
+                shape = RoundedCornerShape(10.dp),
                 color = BreDeepPink
             ) {
                 Text(
-                    text = if (isSearchActive) "Reset Filters" else "Query Relays Now",
-                    style = MaterialTheme.typography.labelLarge,
+                    text = if (isSearchActive) "RESET FILTERS >>>" else "QUERY RELAYS NOW >>>",
+                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Black),
                     color = BreWhite,
-                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 9.dp)
+                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp)
                 )
             }
         }

@@ -133,7 +133,7 @@ interface ShellDao {
     suspend fun deleteAppletsByIds(appletIds: List<String>)
 
     @Query("DELETE FROM installed_applets WHERE isNsite = 0")
-    suspend fun purgeNonNsiteApplets()
+    suspend fun purgeNonNsiteApplets(): Int
 
     @Query("UPDATE installed_applets SET isInstalled = :installed, updatedAt = :now WHERE appletId = :appletId")
     suspend fun setAppletInstalled(appletId: String, installed: Boolean, now: Long = System.currentTimeMillis())

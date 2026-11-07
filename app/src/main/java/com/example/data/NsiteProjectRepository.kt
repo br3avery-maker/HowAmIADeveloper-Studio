@@ -237,6 +237,14 @@ nostrBtn?.addEventListener('click', async () => {
         )
         dao.upsertProject(project)
         writeFileInternal(projectId, "/index.html", htmlBytes)
+        val cleanOrigName = originalFileName.trim().substringAfterLast('/').substringAfterLast('\\')
+        if (
+            cleanOrigName.isNotBlank() &&
+            !cleanOrigName.equals("index.html", ignoreCase = true) &&
+            (cleanOrigName.endsWith(".html", ignoreCase = true) || cleanOrigName.endsWith(".htm", ignoreCase = true))
+        ) {
+            writeFileInternal(projectId, "/$cleanOrigName", htmlBytes)
+        }
         project
     }
 
@@ -780,6 +788,9 @@ nostrBtn?.addEventListener('click', async () => {
             }
             uploadResultsByPath.forEach { (relPath, res) ->
                 add(listOf("path", relPath, res.sha256))
+            }
+            if (!uploadResultsByPath.containsKey("/404.html")) {
+                add(listOf("path", "/404.html", entryUpload.sha256))
             }
             verifiedServersSet.forEach { srv ->
                 add(listOf("server", srv))

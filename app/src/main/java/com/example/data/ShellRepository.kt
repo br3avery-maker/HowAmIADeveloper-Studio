@@ -216,10 +216,10 @@ class ShellRepository(
     }
 
     fun observeNsiteVersions(coordinate: String): Flow<List<NsiteVersionEntity>> =
-        dao.observeNsiteVersions(coordinate)
+        dao.observeVersionsForCoordinate(coordinate)
 
     suspend fun getNsiteVersionsList(coordinate: String): List<NsiteVersionEntity> =
-        withContext(Dispatchers.IO) { dao.getNsiteVersionsList(coordinate) }
+        withContext(Dispatchers.IO) { dao.getVersionsForCoordinate(coordinate) }
 
     suspend fun bootstrapIfNeeded() = withContext(Dispatchers.IO) {
         // 1. Ensure at least one sovereign Nostr account exists in Keystore Vault
@@ -299,8 +299,8 @@ class ShellRepository(
             }
         }
         // Also ensure any non-Nsite items from prior schema versions are cleaned up
-        dao.purgeNonNsiteApplets()
-        fakeIds.size
+        val nonNsitePurged = dao.purgeNonNsiteApplets()
+        fakeIds.size + nonNsitePurged
     }
 
     suspend fun purgeCachedSpamApplets(localPubkeyHex: String): Int = withContext(Dispatchers.IO) {
@@ -719,7 +719,7 @@ class ShellRepository(
         rawAddress: String,
         pinToLibrary: Boolean = true
     ): InstalledAppletEntity = withContext(Dispatchers.IO) {
-        val target = NsiteAddressResolver.resolveAddress(rawAddress, blossomClient.httpClient)
+        val target = NsiteAddressResolver.resolveAddress(rawAddress)
             ?: throw IllegalArgumentException(
                 "Unrecognized Nsite address. Enter an nsite.lol URL, naddr1…, npub1…, 35128:pubkey:slug, or NIP-05."
             )
@@ -742,9 +742,9 @@ class ShellRepository(
                     extraCandidateRelays = target.relayHints
                 )
                 val events = relayPool.queryEventsOnce(
-                    filter = filter,
+                    filterJson = filter,
                     timeoutMs = 3500L,
-                    targetRelayUrls = candidateRelays.take(8).ifEmpty { null }
+                    specificRelays = candidateRelays.take(8)
                 )
                 // Also fetch author Blossom servers (Kind 10063) concurrently if available
                 fetchAuthorBlossomServers(pk)
@@ -788,9 +788,9 @@ class ShellRepository(
                     extraCandidateRelays = target.relayHints
                 )
                 val events = relayPool.queryEventsOnce(
-                    filter = filter,
+                    filterJson = filter,
                     timeoutMs = 3500L,
-                    targetRelayUrls = candidateRelays.take(8).ifEmpty { null }
+                    specificRelays = candidateRelays.take(8)
                 )
                 fetchAuthorBlossomServers(pk)
                 events.sortedBy { it.createdAt }.forEach { ev -> ingestNostrEvent(ev) }

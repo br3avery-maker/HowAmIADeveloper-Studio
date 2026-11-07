@@ -173,9 +173,9 @@ fun FeaturedSpotlightCarousel(
                                     )
                                     Text(
                                         text = buildString {
-                                            append(if (app.isNsite) "NSITE" else "NIP-5D")
-                                            if (group.hasMultipleEditions) append(" • ×${group.stackCount} stacked")
-                                            else if (group.isCuratedNip51) append(" • NIP-51")
+                                            append("ONLINE NOW")
+                                            if (group.hasMultipleEditions) append(" • ×${group.stackCount}")
+                                            else if (group.isCuratedNip51) append(" • ★ REBEL PICK")
                                         },
                                         style = MaterialTheme.typography.labelSmall,
                                         color = if (group.hasMultipleEditions) BreLightPink else ZineBoneCream,
@@ -459,7 +459,17 @@ fun StackedGalleryListCard(
                                 modifier = Modifier.weight(1f)
                             )
                             Spacer(modifier = Modifier.width(6.dp))
-                            ProtocolBadgePill(isNsite = applet.isNsite, nip07 = applet.enableNip07)
+                            Surface(
+                                shape = RoundedCornerShape(4.dp),
+                                color = ZineBoneCream
+                            ) {
+                                Text(
+                                    text = if (applet.isInstalled) "PINNED" else "ONLINE NOW",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Black),
+                                    color = BreBlack,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
                         }
 
                         Spacer(modifier = Modifier.height(3.dp))
@@ -472,7 +482,7 @@ fun StackedGalleryListCard(
                                 profile = publisherProfile,
                                 authorPubkey = applet.authorPubkey,
                                 authorNpub = applet.authorNpub,
-                                dTag = applet.dTag,
+                                dTag = null,
                                 onClickPublisher = onSelectPublisher,
                                 modifier = Modifier.weight(1f, fill = false)
                             )
@@ -505,7 +515,7 @@ fun StackedGalleryListCard(
                             }
                             if (group.isCuratedNip51) {
                                 Text(
-                                    text = "★ NIP-51",
+                                    text = "★ CURATED",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = AmberSignal,
                                     maxLines = 1,
@@ -536,11 +546,11 @@ fun StackedGalleryListCard(
                 ) {
                     Text(
                         text = if (group.hasMultipleEditions) {
-                            "Tap card to compare ${group.stackCount} versions / clones"
+                            "Tap to compare ${group.stackCount} releases"
                         } else if (group.anyInstalled) {
-                            "Pinned on Home Screen"
+                            "Saved in Lobby"
                         } else {
-                            "Tap for manifest & NIP-51 options"
+                            "Tap for editions & options"
                         },
                         style = MaterialTheme.typography.labelSmall,
                         color = if (group.anyInstalled) CyberMint else BreGray600,
@@ -558,20 +568,20 @@ fun StackedGalleryListCard(
 
                     Surface(
                         onClick = onQuickInstallOrOpen,
-                        shape = RoundedCornerShape(999.dp),
-                        color = if (applet.isInstalled) BrePinkDark1 else BreDeepPink
+                        shape = RoundedCornerShape(10.dp),
+                        color = BreDeepPink
                     ) {
                         Text(
                             text = if (applet.isInstalled) {
-                                stringResource(R.string.action_installed_open) + if (opensExternally) " ↗" else " →"
+                                if (opensExternally) "LAUNCH ↗" else "LAUNCH >>>"
                             } else {
-                                stringResource(R.string.action_install)
+                                "INSTALL >>>"
                             },
-                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Black),
                             color = BreWhite,
                             maxLines = 1,
                             softWrap = false,
-                            modifier = Modifier.padding(horizontal = 13.dp, vertical = 6.dp)
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp)
                         )
                     }
                 }

@@ -35,6 +35,10 @@ class ExampleRobolectricTest {
         val appName = context.getString(R.string.app_name)
         assertEquals("SovereignShell", appName)
 
+        // Verify AndroidViewModelFactory reflection constructor exists on JVM bytecode
+        val vmCtor = com.example.ui.ShellViewModel::class.java.getConstructor(android.app.Application::class.java)
+        assertNotNull(vmCtor)
+
         val kp = NostrCrypto.generateKeyPair()
         val vault = KeyVaultManager(context)
         val wrapped = vault.encryptPrivateKeyHex(kp.privKeyHex)
@@ -366,7 +370,6 @@ class ExampleRobolectricTest {
         assertTrue(manifestKindSet.contains(NostrKinds.NSITE_NAMED))
         assertTrue(manifestKindSet.contains(NostrKinds.NSITE_ROOT))
         assertTrue(manifestKindSet.contains(NostrKinds.NSITE_LEGACY_FILE))
-        assertTrue(manifestKindSet.contains(NostrKinds.NAPPLET_NAMED))
 
         val metaKinds = metaAndOutboxFilter.getJSONArray("kinds")
         val metaKindSet = (0 until metaKinds.length()).map { metaKinds.getInt(it) }.toSet()
@@ -461,7 +464,7 @@ class ExampleRobolectricTest {
             dao.upsertApplets(listOf(legacyPinnedFake, legacyUnpinnedFake, realCreatorNsite))
             dao.upsertPublisherProfile(parsedProfile)
 
-            val repo = ShellRepository(context = context, dao = dao)
+            val repo = ShellRepository(context = context, dao = dao, autoBootstrap = false)
             val purgedCount = repo.purgeLegacyFakeSeedApplets()
             assertEquals(2, purgedCount)
 

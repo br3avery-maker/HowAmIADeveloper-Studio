@@ -3,6 +3,7 @@ package com.example.ui
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,14 +22,16 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.CallSplit
+import androidx.compose.material.icons.automirrored.filled.ExitToApp
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material3.Button
@@ -53,6 +56,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -82,6 +87,14 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+/**
+ * Full-bleed Nsite / Web App Runtime Screen modeled after the Deepink Arcade gameplay screen:
+ * - Zero top developer toolbar stealing screen space or projecting raw Kind/hash text over games.
+ * - Floating top-left **Signed-In Nostr Account Profile Icon** (`FAB WRAPPER / SETTINGS ID`).
+ * - Tapping the floating profile icon opens the Amethyst/Ditto-style side drawer (with quick links
+ *   to other saved Nsites, account switcher, and bottom-anchored settings), while long-pressing or
+ *   tapping the HUD pill opens the site's Fork / Versions / Signer / Specs sheet.
+ */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun AppletRuntimeScreen(
@@ -92,6 +105,7 @@ fun AppletRuntimeScreen(
     selectedVersion: NsiteVersionEntity? = null,
     onSelectVersion: (NsiteVersionEntity?) -> Unit = {},
     onForkSite: (NsiteVersionEntity?) -> Unit = {},
+    onOpenShellDrawer: (() -> Unit)? = null,
     onInspectPublisher: ((String) -> Unit)? = null,
     resolveDocument: suspend (InstalledAppletEntity) -> String,
     resolveAsset: suspend (InstalledAppletEntity, String, Boolean, (String) -> String) -> ResolvedWebAsset?,
@@ -128,7 +142,8 @@ fun AppletRuntimeScreen(
         mutableStateOf(effectiveApplet.inlineHtml)
     }
     var htmlDoc by remember { mutableStateOf<String?>(null) }
-    var showBundleSheet by remember { mutableStateOf(false) }
+    var showHudSheet by remember { mutableStateOf(false) }
+    var showUnderTheHoodSpecs by remember { mutableStateOf(false) }
 
     LaunchedEffect(
         effectiveApplet.appletId,
@@ -142,168 +157,111 @@ fun AppletRuntimeScreen(
         htmlDoc = injectRuntimeBootstrap(rawDoc, enableNip07 = effectiveApplet.enableNip07)
     }
 
-    Column(
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .background(BreBlack)
             .windowInsetsPadding(WindowInsets.statusBars)
             .windowInsetsPadding(WindowInsets.navigationBars)
     ) {
-        // SovereignShell Runtime Control Bar
-        Surface(
-            color = ObsidianElevated,
-            border = BorderStroke(1.dp, ObsidianBorder),
-            modifier = Modifier.fillMaxWidth()
+        // 1. 100% Full-Bleed WebView Surface
+        SandboxedAppletSurface(
+            applet = effectiveApplet,
+            rawHtml = rawHtml,
+            assembledWebDoc = htmlDoc,
+            reloadKey = reloadNonce,
+            resolveAsset = { path, isMainFrame ->
+                resolveAsset(effectiveApplet, path, isMainFrame) { doc ->
+                    injectRuntimeBootstrap(doc, enableNip07 = effectiveApplet.enableNip07)
+                }
+            },
+            onBridgeCall = onBridgeCall,
+            onForkSite = { onForkSite(selectedVersion) },
+            modifier = Modifier
+                .fillMaxSize()
+                .testTag("applet_runtime_webview")
+        )
+
+        // 2. Floating Top-Left Signed-In Nostr Profile Icon ("FAB WRAPPER / SETTINGS ID")
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(start = 12.dp, top = 10.dp)
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
+            Box(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                    .size(50.dp)
+                    .minimumInteractiveComponentSize()
+                    .shadow(10.dp, CircleShape, ambientColor = BreDeepPink, spotColor = BreDeepPink)
+                    .clip(CircleShape)
+                    .background(BreBlack.copy(alpha = 0.86f))
+                    .clickable {
+                        if (onOpenShellDrawer != null) {
+                            onOpenShellDrawer()
+                        } else {
+                            showHudSheet = true
+                        }
+                    }
+                    .testTag("runtime_profile_fab"),
+                contentAlignment = Alignment.Center
             ) {
-                Text(
-                    text = effectiveApplet.iconGlyph,
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.padding(start = 4.dp)
+                AccountAvatarThumbnail(
+                    account = activeAccount,
+                    sizeDp = 46,
+                    contentDescription = "Open Nsite Switcher & Settings Drawer"
                 )
-                Spacer(modifier = Modifier.width(8.dp))
-                Column(modifier = Modifier.weight(1f)) {
+            }
+
+            // Compact semi-translucent Site HUD pill (Fork / Options / Exit)
+            Surface(
+                onClick = { showHudSheet = true },
+                shape = RoundedCornerShape(999.dp),
+                color = BreBlack.copy(alpha = 0.78f),
+                border = BorderStroke(1.dp, BrePinkDark2.copy(alpha = 0.85f)),
+                modifier = Modifier.testTag("runtime_inspect_button")
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
                     Text(
                         text = effectiveApplet.title,
-                        style = MaterialTheme.typography.titleSmall,
-                        color = BreWhite,
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                        color = ZineBoneCream,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.width(88.dp)
                     )
-                    val pubCaption = publisherProfile?.bestName
-                        ?: PublisherProfileEntity.shortNpub(effectiveApplet.authorNpub)
-                    Text(
-                        text = buildString {
-                            if (pubCaption.isNotBlank()) append("By $pubCaption")
-                            if (selectedVersion != null) append(" • Pin ${selectedVersion.eventId.take(6)}")
-                            else if (versions.size > 1) append(" • ${versions.size} vers")
-                        },
-                        style = MaterialTheme.typography.labelSmall,
-                        color = BreLightPink,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-
-                FilterChip(
-                    selected = effectiveApplet.enableNip07,
-                    onClick = onToggleNip07,
-                    leadingIcon = {
-                        Icon(
-                            imageVector = Icons.Default.Security,
-                            contentDescription = null,
-                            modifier = Modifier.size(13.dp)
-                        )
-                    },
-                    label = {
-                        Text(
-                            text = if (effectiveApplet.enableNip07) "NIP-07" else "No Signer",
-                            style = MaterialTheme.typography.labelSmall
-                        )
-                    },
-                    modifier = Modifier.testTag("runtime_nip07_toggle")
-                )
-
-                IconButton(
-                    onClick = { onForkSite(selectedVersion) },
-                    modifier = Modifier
-                        .minimumInteractiveComponentSize()
-                        .testTag("runtime_fork_button")
-                ) {
+                    Spacer(modifier = Modifier.width(6.dp))
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.CallSplit,
-                        contentDescription = "Fork this Nsite in Studio",
-                        tint = BreDeepPink
-                    )
-                }
-
-                if (!externalUrl.isNullOrBlank()) {
-                    IconButton(
-                        onClick = {
-                            ExternalSiteLauncher.launchCustomTabOrBrowser(context, externalUrl)
-                        },
+                        contentDescription = "Fork this Nsite",
+                        tint = BreDeepPink,
                         modifier = Modifier
-                            .minimumInteractiveComponentSize()
-                            .testTag("runtime_open_external_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.OpenInNew,
-                            contentDescription = "Open in External Browser",
-                            tint = BreLightPink
-                        )
-                    }
-                }
-
-                IconButton(
-                    onClick = { showBundleSheet = true },
-                    modifier = Modifier
-                        .minimumInteractiveComponentSize()
-                        .testTag("runtime_inspect_button")
-                ) {
-                    Icon(
-                        imageVector = if (versions.size > 1) Icons.Default.History else Icons.Default.Code,
-                        contentDescription = "Inspect versions, publisher, and NIP-5A manifest",
-                        tint = BreWhite
+                            .size(16.dp)
+                            .clickable { onForkSite(selectedVersion) }
+                            .testTag("runtime_fork_button")
                     )
-                }
-
-                IconButton(
-                    onClick = { reloadNonce++ },
-                    modifier = Modifier
-                        .minimumInteractiveComponentSize()
-                        .testTag("runtime_reload_button")
-                ) {
+                    Spacer(modifier = Modifier.width(8.dp))
                     Icon(
-                        imageVector = Icons.Default.Refresh,
-                        contentDescription = "Reload Nsite",
-                        tint = BreGray100
-                    )
-                }
-
-                IconButton(
-                    onClick = onClose,
-                    modifier = Modifier
-                        .minimumInteractiveComponentSize()
-                        .testTag("runtime_close_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Close,
-                        contentDescription = "Close Nsite",
-                        tint = BreWhite
+                        imageVector = Icons.AutoMirrored.Filled.ExitToApp,
+                        contentDescription = "Exit to Lobby",
+                        tint = BreWhite,
+                        modifier = Modifier
+                            .size(16.dp)
+                            .clickable { onClose() }
+                            .testTag("runtime_close_button")
                     )
                 }
             }
         }
-
-        // Full-bleed WebView surface executing real HTML, CSS, JS, Canvas, and relative assets
-        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-            SandboxedAppletSurface(
-                applet = effectiveApplet,
-                rawHtml = rawHtml,
-                assembledWebDoc = htmlDoc,
-                reloadKey = reloadNonce,
-                resolveAsset = { path, isMainFrame ->
-                    resolveAsset(effectiveApplet, path, isMainFrame) { doc ->
-                        injectRuntimeBootstrap(doc, enableNip07 = effectiveApplet.enableNip07)
-                    }
-                },
-                onBridgeCall = onBridgeCall,
-                onForkSite = { onForkSite(selectedVersion) },
-                modifier = Modifier
-                    .fillMaxSize()
-                    .testTag("applet_runtime_webview")
-            )
-        }
     }
 
-    if (showBundleSheet) {
+    if (showHudSheet) {
         ModalBottomSheet(
-            onDismissRequest = { showBundleSheet = false },
+            onDismissRequest = { showHudSheet = false },
             containerColor = ObsidianElevated
         ) {
             Column(
@@ -311,25 +269,66 @@ fun AppletRuntimeScreen(
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState())
                     .padding(horizontal = 20.dp, vertical = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text(
-                        text = "NIP-5A Manifest, Publisher & Versions",
-                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                        color = BreWhite
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = effectiveApplet.iconGlyph,
+                            style = MaterialTheme.typography.headlineMedium
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                text = effectiveApplet.title.uppercase(),
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Black),
+                                color = ZineBoneCream
+                            )
+                            val pubCaption = publisherProfile?.bestName
+                                ?: PublisherProfileEntity.shortNpub(effectiveApplet.authorNpub)
+                            Text(
+                                text = "By $pubCaption",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = BreLightPink
+                            )
+                        }
+                    }
+
                     Button(
                         onClick = {
-                            showBundleSheet = false
+                            showHudSheet = false
+                            onClose()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = BreGray900),
+                        shape = RoundedCornerShape(999.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ExitToApp,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Exit to Lobby", color = BreWhite)
+                    }
+                }
+
+                // Primary Action Row: Fork in Studio, Reload, Open in Browser, Open Side Drawer
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Button(
+                        onClick = {
+                            showHudSheet = false
                             onForkSite(selectedVersion)
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = BreDeepPink),
-                        shape = RoundedCornerShape(999.dp),
+                        shape = RoundedCornerShape(12.dp),
                         modifier = Modifier.testTag("sheet_fork_nsite_button")
                     ) {
                         Icon(
@@ -338,7 +337,72 @@ fun AppletRuntimeScreen(
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Fork in Studio", color = BreWhite)
+                        Text("FORK & EDIT IN STUDIO >>>", color = BreWhite, fontWeight = FontWeight.Bold)
+                    }
+
+                    FilterChip(
+                        selected = effectiveApplet.enableNip07,
+                        onClick = onToggleNip07,
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Default.Security,
+                                contentDescription = null,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        },
+                        label = {
+                            Text(
+                                text = if (effectiveApplet.enableNip07) "Signer Connected" else "Signer Off",
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        },
+                        modifier = Modifier.testTag("runtime_nip07_toggle")
+                    )
+
+                    OutlinedButton(
+                        onClick = {
+                            reloadNonce++
+                            showHudSheet = false
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.testTag("runtime_reload_button")
+                    ) {
+                        Icon(imageVector = Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Reload")
+                    }
+
+                    if (!externalUrl.isNullOrBlank()) {
+                        OutlinedButton(
+                            onClick = {
+                                showHudSheet = false
+                                ExternalSiteLauncher.launchCustomTabOrBrowser(context, externalUrl)
+                            },
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.testTag("runtime_open_external_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.OpenInNew,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Browser")
+                        }
+                    }
+
+                    if (onOpenShellDrawer != null) {
+                        OutlinedButton(
+                            onClick = {
+                                showHudSheet = false
+                                onOpenShellDrawer()
+                            },
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Icon(imageVector = Icons.Default.Menu, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Switch Nsite / Drawer")
+                        }
                     }
                 }
 
@@ -348,40 +412,28 @@ fun AppletRuntimeScreen(
                     authorNpub = effectiveApplet.authorNpub,
                     onFilterByPublisher = onInspectPublisher?.let { fn ->
                         { pk ->
-                            showBundleSheet = false
+                            showHudSheet = false
                             fn(pk)
                         }
                     }
                 )
 
-                Text(
-                    text = "Kind ${effectiveApplet.kind} • d:${effectiveApplet.dTag} • Signer: ${activeAccount?.displayName ?: "None"}",
-                    fontFamily = JetBrainsMonoFontFamily,
-                    fontSize = 11.sp,
-                    color = BreLightPink
-                )
-                if (effectiveApplet.indexSha256.isNotBlank()) {
-                    Text(
-                        text = "Entry SHA-256: ${effectiveApplet.indexSha256}",
-                        fontFamily = JetBrainsMonoFontFamily,
-                        fontSize = 11.sp,
-                        color = CyberMint
-                    )
-                }
-                Text(
-                    text = "Primary Blossom: ${effectiveApplet.blossomServer}",
-                    fontFamily = JetBrainsMonoFontFamily,
-                    fontSize = 11.sp,
-                    color = BreGray100
-                )
-
                 if (versions.isNotEmpty()) {
                     HorizontalDivider(color = ObsidianBorder)
-                    Text(
-                        text = "AVAILABLE SIGNED VERSIONS (${versions.size})",
-                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                        color = ZineBoneCream
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.History,
+                            contentDescription = null,
+                            tint = ZineBoneCream,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "RELEASE VERSIONS (${versions.size})",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                            color = ZineBoneCream
+                        )
+                    }
                     val dateFmt = remember { SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US) }
                     versions.forEach { ver ->
                         val isCurrent = (selectedVersion?.eventId ?: applet.latestEventId) == ver.eventId
@@ -400,19 +452,19 @@ fun AppletRuntimeScreen(
                             ) {
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
-                                        text = "${dateFmt.format(Date(ver.createdAtSec * 1000L))} • ${ver.fileCount} file(s)",
+                                        text = "${dateFmt.format(Date(ver.createdAtSec * 1000L))} • ${ver.fileCount} files",
                                         style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
                                         color = if (isCurrent) BreLightPink else BreWhite
                                     )
-                                    Text(
-                                        text = "ev:${ver.eventId.take(12)}… • sha:${ver.indexSha256.take(12)}…" +
-                                            if (ver.signatureVerified) " • Schnorr ✓" else "",
-                                        fontFamily = JetBrainsMonoFontFamily,
-                                        fontSize = 10.sp,
-                                        color = CyberMint
-                                    )
+                                    if (ver.signatureVerified) {
+                                        Text(
+                                            text = "Verified Nostr release",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = CyberMint
+                                        )
+                                    }
                                 }
-                                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                     if (!isCurrent) {
                                         OutlinedButton(
                                             onClick = {
@@ -426,7 +478,7 @@ fun AppletRuntimeScreen(
                                     }
                                     OutlinedButton(
                                         onClick = {
-                                            showBundleSheet = false
+                                            showHudSheet = false
                                             onForkSite(ver)
                                         },
                                         border = BorderStroke(1.dp, BrePinkDark2),
@@ -440,28 +492,65 @@ fun AppletRuntimeScreen(
                     }
                 }
 
-                HorizontalDivider(color = ObsidianBorder)
-                Text(
-                    text = "VERIFIED ENTRY HTML SOURCE",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = ZineBoneCream
-                )
-                Surface(
+                // Optional Under-the-Hood Protocol Specs (hidden unless explicitly toggled!)
+                OutlinedButton(
+                    onClick = { showUnderTheHoodSpecs = !showUnderTheHoodSpecs },
+                    border = BorderStroke(1.dp, ObsidianBorder),
                     shape = RoundedCornerShape(12.dp),
-                    color = BreGray900,
-                    border = BorderStroke(1.dp, BrePinkDark2),
                     modifier = Modifier.fillMaxWidth()
                 ) {
+                    Icon(imageVector = Icons.Default.Code, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = rawHtml.take(3000).ifBlank { "(Empty HTML)" },
-                        fontFamily = JetBrainsMonoFontFamily,
-                        fontSize = 11.sp,
-                        lineHeight = 16.sp,
-                        color = BreGray100,
-                        modifier = Modifier.padding(12.dp)
+                        text = if (showUnderTheHoodSpecs) "Hide Under-the-Hood Protocol Specs" else "Inspect Under-the-Hood Manifest & Hashes",
+                        color = BreGray100
                     )
                 }
-                Spacer(modifier = Modifier.height(20.dp))
+
+                if (showUnderTheHoodSpecs) {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = BreGray900,
+                        border = BorderStroke(1.dp, BrePinkDark2),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                text = "Kind ${effectiveApplet.kind} • d:${effectiveApplet.dTag}",
+                                fontFamily = JetBrainsMonoFontFamily,
+                                fontSize = 11.sp,
+                                color = BreLightPink
+                            )
+                            if (effectiveApplet.indexSha256.isNotBlank()) {
+                                Text(
+                                    text = "Entry SHA-256: ${effectiveApplet.indexSha256}",
+                                    fontFamily = JetBrainsMonoFontFamily,
+                                    fontSize = 11.sp,
+                                    color = CyberMint
+                                )
+                            }
+                            Text(
+                                text = "Blossom: ${effectiveApplet.blossomServer}",
+                                fontFamily = JetBrainsMonoFontFamily,
+                                fontSize = 11.sp,
+                                color = BreGray100
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = rawHtml.take(2000).ifBlank { "(Empty HTML)" },
+                                fontFamily = JetBrainsMonoFontFamily,
+                                fontSize = 10.sp,
+                                lineHeight = 14.sp,
+                                color = BreGray100
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
             }
         }
     }

@@ -1,6 +1,6 @@
 {
-  "summary":  "Implementation plan for upgrading SovereignShell's Discovery screen into a Home-screen-matched Curated Gallery & App Store with multi-signal clone/version stacking, an interactive Version Picker Bottom Sheet, NIP-51 curation lists + categories + featured picks, and an optional Live Relay Feed toggle.",
-  "updatedAt":  "2026-11-01T09:12:14.440683037Z",
+  "summary":  "Revised SovereignShell implementation plan aligned with the 4 Deepink / Deepink Arcade reference mockups:\n1. Eliminates \"developer plumbing projection\" from user-facing cards and screens (hiding raw Kind numbers, SHA-256 hashes, and relay URLs inside an on-demand Inspector sheet instead of cluttering cards).\n2. Full-screen Running Nsite WebView with a single floating top-left Avatar / ≠ Medallion FAB (\"FAB Wrapper / Settings ID\") instead of a developer toolbar.\n3. Deepink visual language: bold condensed Bone Cream (#E8DCC8) headers, taped/tilted label strips, distressed Deep Pink (#FF1493) CTA buttons with \">>>\" arrows, jagged pink telemetry waveforms on the Node/Network screen, left slide-out drawer, and the bottom navigation dock featuring the raised glowing \"≠\" center FAB.",
+  "updatedAt":  "2026-11-07T10:45:29.919535961Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

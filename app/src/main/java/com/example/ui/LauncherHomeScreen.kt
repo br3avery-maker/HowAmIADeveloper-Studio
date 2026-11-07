@@ -25,7 +25,6 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
@@ -39,12 +38,11 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.CallSplit
 import androidx.compose.material.icons.automirrored.outlined.ViewList
-import androidx.compose.material.icons.filled.Code
-import androidx.compose.material.icons.filled.EditNote
 import androidx.compose.material.icons.filled.GridView
-import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
@@ -61,6 +59,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -69,6 +68,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -94,6 +94,7 @@ import com.example.nostr.NostrCrypto
 import com.example.ui.theme.BreBlack
 import com.example.ui.theme.BreDeepPink
 import com.example.ui.theme.BreGray100
+import com.example.ui.theme.BreGray600
 import com.example.ui.theme.BreGray850
 import com.example.ui.theme.BreGray900
 import com.example.ui.theme.BreLightPink
@@ -101,10 +102,17 @@ import com.example.ui.theme.BrePinkDark1
 import com.example.ui.theme.BrePinkDark2
 import com.example.ui.theme.BrePinkDark3
 import com.example.ui.theme.BreWhite
-import com.example.ui.theme.ObsidianCardGlass
+import com.example.ui.theme.CyberMint
 import com.example.ui.theme.ZineBoneCream
 import java.io.File
 
+/**
+ * Deepink Arcade "THE LOBBY" Home Launcher Screen:
+ * - Top-Left: Signed-in Nostr account profile icon (opens Amethyst/Ditto side drawer).
+ * - Bold Bone-Cream Header ("SELECT NSITE") + Grid/List toggle + Explore Search shortcut.
+ * - Direct Manual NIP-5A Address / URL Launch Bar (`nsite.lol`, `naddr1…`, `npub1…`, `user@domain`).
+ * - Hero Spotlight Card + Saved Library Grid/List with zero raw developer plumbing projected onto cards.
+ */
 @Composable
 fun LauncherHomeScreen(
     activeAccount: VaultAccountEntity?,
@@ -114,6 +122,8 @@ fun LauncherHomeScreen(
     connectedRelays: Int,
     totalRelays: Int,
     onOpenSearchFeed: () -> Unit,
+    onLaunchManualAddress: (String) -> Unit = {},
+    onForkManualAddress: (String) -> Unit = {},
     onInspectPublisher: (String) -> Unit = {},
     onSyncRelays: () -> Unit = {},
     onToggleViewMode: () -> Unit,
@@ -130,17 +140,15 @@ fun LauncherHomeScreen(
     onOpenStudio: () -> Unit
 ) {
     var inspectedManifestApplet by remember { mutableStateOf<InstalledAppletEntity?>(null) }
+    var manualAddressInput by rememberSaveable { mutableStateOf("") }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        // 1. Custom Home Screen Background Layer (Cyber-Zine / BreBre Neon Orbs / Custom Photo)
         LauncherWallpaperLayer(prefs = launcherPrefs)
 
-        // 2. Main Foreground OS Launcher Content
         BoxWithConstraints(
             modifier = Modifier
                 .fillMaxSize()
                 .windowInsetsPadding(WindowInsets.statusBars)
-                .windowInsetsPadding(WindowInsets.navigationBars)
         ) {
             val isWide = maxWidth >= 600.dp
             val gridColumns = if (isWide) 6 else 4
@@ -152,7 +160,7 @@ fun LauncherHomeScreen(
                     .align(Alignment.TopCenter)
                     .padding(horizontal = 16.dp, vertical = 10.dp)
             ) {
-                // Top Launcher Bar: Search Pill + Grid/List Toggle + Upper-Right Agent Zone Medallion
+                // 1. Top Header: Signed-in Nostr Profile Icon (Left) + "SELECT NSITE" + Search & View Toggle
                 LauncherTopBar(
                     activeAccount = activeAccount,
                     viewMode = launcherPrefs.viewMode,
@@ -162,19 +170,25 @@ fun LauncherHomeScreen(
                     onOpenAccountDrawer = onOpenAccountDrawer
                 )
 
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(10.dp))
 
-                // Zine Micro-Series Banner & Agent Identity Strip
-                ZineLauncherBannerStrip(
-                    activeAccount = activeAccount,
-                    connectedRelays = connectedRelays,
-                    totalRelays = totalRelays,
-                    onOpenRelayManager = onOpenRelayManager
+                // 2. Direct NIP-5A Address / URL Launch Bar (nsite.lol, naddr1, npub1, user@domain)
+                ManualAddressLaunchBar(
+                    addressInput = manualAddressInput,
+                    onAddressChange = { manualAddressInput = it },
+                    onLaunchAddress = {
+                        onLaunchManualAddress(manualAddressInput)
+                        manualAddressInput = ""
+                    },
+                    onForkAddress = {
+                        onForkManualAddress(manualAddressInput)
+                        manualAddressInput = ""
+                    }
                 )
 
                 Spacer(modifier = Modifier.height(12.dp))
 
-                // Center Pinned Napplets & Nsites Canvas (Icon Grid vs BreBre Specimen List)
+                // 3. Main Lobby Canvas
                 Box(modifier = Modifier.weight(1f)) {
                     if (installedApplets.isEmpty()) {
                         EmptyLauncherPlaceholder(
@@ -193,29 +207,44 @@ fun LauncherHomeScreen(
                         ) { mode ->
                             when (mode) {
                                 LauncherViewMode.ICON_GRID -> {
-                                    LazyVerticalGrid(
-                                        columns = GridCells.Fixed(gridColumns),
-                                        contentPadding = PaddingValues(vertical = 8.dp),
-                                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                        verticalArrangement = Arrangement.spacedBy(18.dp),
-                                        modifier = Modifier
-                                            .fillMaxSize()
-                                            .testTag("launcher_icon_grid")
-                                    ) {
-                                        items(installedApplets, key = { it.appletId }) { applet ->
-                                            LauncherGridTile(
-                                                applet = applet,
-                                                publisherProfile = publisherProfiles[applet.authorPubkey.lowercase()],
-                                                onLaunch = { onLaunchApplet(applet) },
-                                                onLaunchInApp = { onLaunchInApp(applet) },
-                                                onLaunchExternal = onLaunchExternal?.let { fn -> { fn(applet) } },
-                                                onInspectPublisher = { onInspectPublisher(applet.authorPubkey) },
-                                                onViewManifest = { inspectedManifestApplet = applet },
-                                                onOpenPermissions = onOpenAppletPermissions,
-                                                onFork = { onForkApplet(applet) },
-                                                onToggleNip07 = { onToggleNip07(applet) },
-                                                onUnpin = { onUnpinApplet(applet) }
-                                            )
+                                    Column(modifier = Modifier.fillMaxSize()) {
+                                        // Deepink Arcade Hero Spotlight Card for top pinned Nsite
+                                        val heroSite = installedApplets.first()
+                                        DeepinkLobbyHeroCard(
+                                            applet = heroSite,
+                                            publisherProfile = publisherProfiles[heroSite.authorPubkey.lowercase()],
+                                            onLaunch = { onLaunchApplet(heroSite) },
+                                            onFork = { onForkApplet(heroSite) },
+                                            onInspect = { inspectedManifestApplet = heroSite }
+                                        )
+
+                                        Spacer(modifier = Modifier.height(14.dp))
+
+                                        LazyVerticalGrid(
+                                            columns = GridCells.Fixed(gridColumns),
+                                            contentPadding = PaddingValues(vertical = 6.dp),
+                                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                            verticalArrangement = Arrangement.spacedBy(16.dp),
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .fillMaxWidth()
+                                                .testTag("launcher_icon_grid")
+                                        ) {
+                                            items(installedApplets, key = { it.appletId }) { applet ->
+                                                LauncherGridTile(
+                                                    applet = applet,
+                                                    publisherProfile = publisherProfiles[applet.authorPubkey.lowercase()],
+                                                    onLaunch = { onLaunchApplet(applet) },
+                                                    onLaunchInApp = { onLaunchInApp(applet) },
+                                                    onLaunchExternal = onLaunchExternal?.let { fn -> { fn(applet) } },
+                                                    onInspectPublisher = { onInspectPublisher(applet.authorPubkey) },
+                                                    onViewManifest = { inspectedManifestApplet = applet },
+                                                    onOpenPermissions = onOpenAppletPermissions,
+                                                    onFork = { onForkApplet(applet) },
+                                                    onToggleNip07 = { onToggleNip07(applet) },
+                                                    onUnpin = { onUnpinApplet(applet) }
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -254,15 +283,6 @@ fun LauncherHomeScreen(
                         }
                     }
                 }
-
-                Spacer(modifier = Modifier.height(10.dp))
-
-                // Bottom Frosted Dock: Quick NIP-01 Note Composer + Relay Pool + Creator Studio
-                LauncherBottomDock(
-                    onOpenNotesComposer = onOpenNotesComposer,
-                    onOpenRelayManager = onOpenRelayManager,
-                    onOpenStudio = onOpenStudio
-                )
             }
         }
 
@@ -275,6 +295,11 @@ fun LauncherHomeScreen(
                     inspectedManifestApplet = null
                     onInspectPublisher(pubkeyHex)
                 },
+                onFork = {
+                    val target = manifestTarget
+                    inspectedManifestApplet = null
+                    onForkApplet(target)
+                },
                 onDismiss = { inspectedManifestApplet = null }
             )
         }
@@ -282,101 +307,218 @@ fun LauncherHomeScreen(
 }
 
 @Composable
-private fun ZineLauncherBannerStrip(
-    activeAccount: VaultAccountEntity?,
-    connectedRelays: Int,
-    totalRelays: Int,
-    onOpenRelayManager: () -> Unit
+private fun ManualAddressLaunchBar(
+    addressInput: String,
+    onAddressChange: (String) -> Unit,
+    onLaunchAddress: () -> Unit,
+    onForkAddress: () -> Unit
 ) {
     Surface(
-        shape = RoundedCornerShape(18.dp),
-        color = BreGray900.copy(alpha = 0.88f),
+        shape = RoundedCornerShape(14.dp),
+        color = BreGray900.copy(alpha = 0.94f),
         border = BorderStroke(1.dp, BrePinkDark2),
         modifier = Modifier.fillMaxWidth()
     ) {
-        Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 6.dp)
+        ) {
+            Box(
+                contentAlignment = Alignment.CenterStart,
+                modifier = Modifier
+                    .weight(1f)
+                    .height(36.dp)
+            ) {
+                if (addressInput.isEmpty()) {
+                    Text(
+                        text = stringResource(R.string.manual_address_hint),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = BreGray600,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                BasicTextField(
+                    value = addressInput,
+                    onValueChange = onAddressChange,
+                    singleLine = true,
+                    textStyle = MaterialTheme.typography.bodySmall.copy(color = BreWhite),
+                    cursorBrush = SolidColor(BreDeepPink),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("launcher_manual_address_input")
+                )
+            }
+
+            if (addressInput.isNotBlank()) {
+                Surface(
+                    onClick = onForkAddress,
+                    shape = RoundedCornerShape(8.dp),
+                    color = BreGray850,
+                    border = BorderStroke(1.dp, BrePinkDark1),
+                    modifier = Modifier.testTag("launcher_manual_fork_button")
+                ) {
+                    Text(
+                        text = "FORK",
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Black),
+                        color = BreLightPink,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.width(6.dp))
+            }
+
+            Surface(
+                onClick = onLaunchAddress,
+                shape = RoundedCornerShape(8.dp),
+                color = BreDeepPink,
+                modifier = Modifier.testTag("launcher_manual_open_button")
+            ) {
+                Text(
+                    text = "LAUNCH >>>",
+                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Black),
+                    color = BreWhite,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DeepinkLobbyHeroCard(
+    applet: InstalledAppletEntity,
+    publisherProfile: PublisherProfileEntity?,
+    onLaunch: () -> Unit,
+    onFork: () -> Unit,
+    onInspect: () -> Unit
+) {
+    val pubCaption = publisherProfile?.bestName ?: PublisherProfileEntity.shortNpub(applet.authorNpub)
+
+    Surface(
+        onClick = onLaunch,
+        shape = RoundedCornerShape(20.dp),
+        color = BreGray850.copy(alpha = 0.96f),
+        border = BorderStroke(1.5.dp, BreDeepPink),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("lobby_hero_card")
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "☆ ${activeAccount?.displayName?.ifBlank { "SOVEREIGN SHELL" }?.uppercase() ?: "SOVEREIGN SHELL"} ☆",
-                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                        color = BreDeepPink,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        text = "N A P P L E T  •  N S I T E  •  S I G N E R",
-                        style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 1.6.sp),
-                        color = ZineBoneCream
-                    )
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                    Box(
+                        modifier = Modifier
+                            .size(56.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(BreBlack)
+                            .border(1.5.dp, BreDeepPink, RoundedCornerShape(16.dp)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = applet.iconGlyph,
+                            style = MaterialTheme.typography.headlineMedium
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = applet.title.uppercase(),
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                fontWeight = FontWeight.Black,
+                                letterSpacing = 0.8.sp
+                            ),
+                            color = BreWhite,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = applet.description,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = BreGray100,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = "By $pubCaption" + if (applet.cachedComplete) " • Verified Offline" else "",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = BreLightPink
+                        )
+                    }
                 }
 
+                // Taped Bone-Cream "ONLINE NOW" badge from Deepink Arcade mockup
                 Surface(
-                    onClick = onOpenRelayManager,
-                    shape = RoundedCornerShape(999.dp),
-                    color = BreBlack,
-                    border = BorderStroke(1.dp, BrePinkDark1),
-                    modifier = Modifier.testTag("home_relay_status_chip")
+                    shape = RoundedCornerShape(4.dp),
+                    color = ZineBoneCream
                 ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                    Text(
+                        text = "ONLINE NOW",
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Black),
+                        color = BreBlack,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Surface(
+                    onClick = onLaunch,
+                    shape = RoundedCornerShape(12.dp),
+                    color = BreDeepPink,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier.padding(vertical = 11.dp)
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(8.dp)
-                                .clip(CircleShape)
-                                .background(if (connectedRelays > 0) BreDeepPink else ZineBoneCream)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "$connectedRelays/$totalRelays RELAYS",
-                            style = MaterialTheme.typography.labelSmall,
+                            text = "PLAY / LAUNCH NSITE >>>",
+                            style = MaterialTheme.typography.labelLarge.copy(
+                                fontWeight = FontWeight.Black,
+                                letterSpacing = 0.8.sp
+                            ),
                             color = BreWhite
                         )
                     }
                 }
-            }
 
-            Spacer(modifier = Modifier.height(6.dp))
-
-            // Circuit Node Divider (inspired by Conquer ≠ Dance reference)
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Canvas(modifier = Modifier.weight(1f).height(8.dp)) {
-                    val midY = size.height / 2f
-                    drawCircle(color = BreDeepPink, radius = 3.dp.toPx(), center = Offset(4.dp.toPx(), midY))
-                    drawLine(
-                        color = BrePinkDark2,
-                        start = Offset(8.dp.toPx(), midY),
-                        end = Offset(size.width, midY),
-                        strokeWidth = 1.dp.toPx()
-                    )
-                }
-                Text(
-                    text = "  ${activeAccount?.npub?.let { "${it.take(12)}…${it.takeLast(5)}" } ?: "VAULT READY"}  ",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = BreLightPink
-                )
-                Canvas(modifier = Modifier.weight(1f).height(8.dp)) {
-                    val midY = size.height / 2f
-                    drawLine(
-                        color = BrePinkDark2,
-                        start = Offset(0f, midY),
-                        end = Offset(size.width - 8.dp.toPx(), midY),
-                        strokeWidth = 1.dp.toPx()
-                    )
-                    drawCircle(
-                        color = BreDeepPink,
-                        radius = 3.dp.toPx(),
-                        center = Offset(size.width - 4.dp.toPx(), midY)
-                    )
+                Surface(
+                    onClick = onFork,
+                    shape = RoundedCornerShape(12.dp),
+                    color = BreBlack,
+                    border = BorderStroke(1.dp, BrePinkDark2)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 11.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.CallSplit,
+                            contentDescription = "Fork",
+                            tint = BreLightPink,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "FORK",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                            color = BreLightPink
+                        )
+                    }
                 }
             }
         }
@@ -428,7 +570,6 @@ fun LauncherWallpaperLayer(
             }
 
             WallpaperStyle.BREBRE_NEON_ORBS -> {
-                // Signature BreBre Pitch-Black + Glowing Top-Right & Bottom-Left Deep Pink Orbs
                 Canvas(modifier = Modifier.fillMaxSize()) {
                     drawRect(color = BreBlack)
                     drawCircle(
@@ -516,40 +657,63 @@ private fun LauncherTopBar(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        // Search Bar opening Full-Page Napplets | Nsites Feed
+        // Top-Left Signed-In Nostr Account Profile Icon (opens Amethyst/Ditto Left Drawer)
+        Box(
+            modifier = Modifier
+                .size(48.dp)
+                .minimumInteractiveComponentSize()
+                .clip(CircleShape)
+                .clickable(onClick = onOpenAccountDrawer)
+                .testTag("account_drawer_button"),
+            contentAlignment = Alignment.Center
+        ) {
+            AccountAvatarThumbnail(
+                account = activeAccount,
+                sizeDp = 46,
+                contentDescription = stringResource(R.string.cd_open_account_drawer)
+            )
+        }
+
+        // Bold Condensed Bone-Cream Header ("SELECT NSITE")
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = "SELECT NSITE",
+                style = MaterialTheme.typography.headlineSmall.copy(
+                    fontWeight = FontWeight.Black,
+                    letterSpacing = 1.4.sp
+                ),
+                color = ZineBoneCream,
+                maxLines = 1
+            )
+            Text(
+                text = "${activeAccount?.displayName?.ifBlank { "REBEL LOBBY" } ?: "REBEL LOBBY"} • $connectedRelays ONLINE",
+                style = MaterialTheme.typography.labelSmall,
+                color = BreLightPink,
+                maxLines = 1
+            )
+        }
+
+        // Search Feed Button
         Surface(
             onClick = onOpenSearchFeed,
-            shape = RoundedCornerShape(999.dp),
+            shape = CircleShape,
             color = BreGray900.copy(alpha = 0.92f),
             border = BorderStroke(1.dp, BrePinkDark2),
             modifier = Modifier
-                .weight(1f)
-                .height(50.dp)
+                .size(48.dp)
+                .minimumInteractiveComponentSize()
                 .testTag("launcher_search_bar")
         ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 16.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            Box(contentAlignment = Alignment.Center) {
                 Icon(
                     imageVector = Icons.Default.Search,
-                    contentDescription = null,
+                    contentDescription = "Search Chaos Feed",
                     tint = BreDeepPink
-                )
-                Spacer(modifier = Modifier.width(10.dp))
-                Text(
-                    text = stringResource(R.string.search_napplets_nsites),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = BreGray100,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
                 )
             }
         }
 
-        // Toggle for Icon Grid / List with Descriptions
+        // Toggle for Icon Grid / List
         Surface(
             onClick = onToggleViewMode,
             shape = CircleShape,
@@ -571,23 +735,6 @@ private fun LauncherTopBar(
                     tint = BreWhite
                 )
             }
-        }
-
-        // Upper-Right Account Medallion (Agent Zone Customizable Stamped Badge)
-        Box(
-            modifier = Modifier
-                .size(48.dp)
-                .minimumInteractiveComponentSize()
-                .clip(CircleShape)
-                .clickable(onClick = onOpenAccountDrawer)
-                .testTag("account_drawer_button"),
-            contentAlignment = Alignment.Center
-        ) {
-            AccountAvatarThumbnail(
-                account = activeAccount,
-                sizeDp = 46,
-                contentDescription = stringResource(R.string.cd_open_account_drawer)
-            )
         }
     }
 }
@@ -616,7 +763,6 @@ fun AccountAvatarThumbnail(
         modifier = Modifier.size(sizeDp.dp),
         contentAlignment = Alignment.Center
     ) {
-        // Stamped Agent-Zone outer ring + dashed inner Stitch
         Canvas(modifier = Modifier.fillMaxSize()) {
             val r = size.minDimension / 2f
             drawCircle(
@@ -718,7 +864,7 @@ private fun LauncherGridTile(
                         .background(BreGray850.copy(alpha = 0.94f))
                         .border(
                             width = 1.2.dp,
-                            color = if (applet.isNsite) ZineBoneCream.copy(alpha = 0.8f) else BreDeepPink,
+                            color = BreDeepPink,
                             shape = RoundedCornerShape(18.dp)
                         ),
                     contentAlignment = Alignment.Center
@@ -749,7 +895,7 @@ private fun LauncherGridTile(
             Text(
                 text = publisherCaption,
                 style = MaterialTheme.typography.labelSmall,
-                color = if (applet.isNsite) ZineBoneCream else BreLightPink,
+                color = ZineBoneCream,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 textAlign = TextAlign.Center
@@ -790,7 +936,6 @@ private fun LauncherDescriptionRow(
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
 
-    // Styled directly after BreBre Colors "CARD EXAMPLE" UI Specimen
     Surface(
         onClick = onLaunch,
         shape = RoundedCornerShape(20.dp),
@@ -826,26 +971,19 @@ private fun LauncherDescriptionRow(
                     }
                     Spacer(modifier = Modifier.width(12.dp))
                     Column(modifier = Modifier.weight(1f)) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Text(
-                                text = applet.title,
-                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                                color = BreWhite,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f, fill = false)
-                            )
-                            ProtocolBadgePill(isNsite = applet.isNsite, nip07 = applet.enableNip07)
-                        }
+                        Text(
+                            text = applet.title,
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                            color = BreWhite,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                         Spacer(modifier = Modifier.height(3.dp))
                         PublisherAttributionRow(
                             profile = publisherProfile,
                             authorPubkey = applet.authorPubkey,
                             authorNpub = applet.authorNpub,
-                            dTag = applet.dTag,
+                            dTag = null,
                             onClickPublisher = { onInspectPublisher() }
                         )
                     }
@@ -858,7 +996,7 @@ private fun LauncherDescriptionRow(
                     ) {
                         Icon(
                             imageVector = Icons.Default.MoreVert,
-                            contentDescription = "Applet options",
+                            contentDescription = "Nsite options",
                             tint = BreGray100
                         )
                     }
@@ -891,21 +1029,36 @@ private fun LauncherDescriptionRow(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            Surface(
-                onClick = onLaunch,
-                shape = RoundedCornerShape(999.dp),
-                color = BrePinkDark1
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = when {
-                        opensExternally -> "Open Nsite ↗"
-                        applet.isNsite -> "Open Nsite →"
-                        else -> "Launch Napplet →"
-                    },
-                    style = MaterialTheme.typography.labelLarge,
-                    color = BreWhite,
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp)
-                )
+                Surface(
+                    onClick = onLaunch,
+                    shape = RoundedCornerShape(10.dp),
+                    color = BreDeepPink
+                ) {
+                    Text(
+                        text = if (opensExternally) "LAUNCH ↗" else "LAUNCH >>>",
+                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Black),
+                        color = BreWhite,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                    )
+                }
+
+                Surface(
+                    onClick = onFork,
+                    shape = RoundedCornerShape(10.dp),
+                    color = BreBlack,
+                    border = BorderStroke(1.dp, BrePinkDark2)
+                ) {
+                    Text(
+                        text = "FORK",
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                        color = BreLightPink,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                    )
+                }
             }
         }
     }
@@ -913,18 +1066,14 @@ private fun LauncherDescriptionRow(
 
 @Composable
 fun ProtocolBadgePill(isNsite: Boolean, nip07: Boolean) {
-    val label = buildString {
-        append(if (isNsite) "NSITE" else "NIP-5D")
-        if (nip07) append(" • NIP-07")
-    }
     Surface(
-        shape = RoundedCornerShape(6.dp),
-        color = if (isNsite) Color(0xFF28221A) else BrePinkDark3
+        shape = RoundedCornerShape(4.dp),
+        color = ZineBoneCream
     ) {
         Text(
-            text = label,
-            style = MaterialTheme.typography.labelSmall,
-            color = if (isNsite) ZineBoneCream else BreLightPink,
+            text = "LIVE",
+            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Black),
+            color = BreBlack,
             maxLines = 1,
             softWrap = false,
             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
@@ -951,9 +1100,16 @@ private fun AppletContextDropdown(
     val pubLabel = publisherProfile?.bestName ?: PublisherProfileEntity.shortNpub(applet.authorNpub)
 
     DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+        DropdownMenuItem(
+            text = { Text("Launch in Built-in WebView") },
+            onClick = {
+                onDismiss()
+                onLaunchInApp()
+            }
+        )
         if (hasExternalUrl && onLaunchExternal != null) {
             DropdownMenuItem(
-                text = { Text("Open in Custom Tab Sheet ↗") },
+                text = { Text("Open in External Browser ↗") },
                 onClick = {
                     onDismiss()
                     onLaunchExternal()
@@ -961,10 +1117,10 @@ private fun AppletContextDropdown(
             )
         }
         DropdownMenuItem(
-            text = { Text("Open in Built-in WebView Sandbox") },
+            text = { Text("Fork & Edit in Studio", fontWeight = FontWeight.Bold, color = BreDeepPink) },
             onClick = {
                 onDismiss()
-                onLaunchInApp()
+                onFork()
             }
         )
         if (applet.authorPubkey.length == 64) {
@@ -977,35 +1133,28 @@ private fun AppletContextDropdown(
             )
         }
         DropdownMenuItem(
-            text = { Text("View Publisher & Manifest") },
+            text = { Text("Under-the-Hood Manifest & Hashes") },
             onClick = {
                 onDismiss()
                 onViewManifest()
             }
         )
         DropdownMenuItem(
-            text = { Text("Applet Permissions & Audit") },
-            onClick = {
-                onDismiss()
-                onOpenPermissions()
-            }
-        )
-        DropdownMenuItem(
-            text = { Text(if (applet.enableNip07) "Disable NIP-07 (Strict NIP-5D)" else "Enable NIP-07 window.nostr") },
+            text = { Text(if (applet.enableNip07) "Disconnect window.nostr Signer" else "Connect window.nostr Signer") },
             onClick = {
                 onDismiss()
                 onToggleNip07()
             }
         )
         DropdownMenuItem(
-            text = { Text("Fork & Edit in Studio") },
+            text = { Text("Signing Permissions & Audit") },
             onClick = {
                 onDismiss()
-                onFork()
+                onOpenPermissions()
             }
         )
         DropdownMenuItem(
-            text = { Text("Remove from Home") },
+            text = { Text("Remove from Lobby") },
             onClick = {
                 onDismiss()
                 onUnpin()
@@ -1019,6 +1168,7 @@ private fun ManifestInspectorDialog(
     applet: InstalledAppletEntity,
     publisherProfile: PublisherProfileEntity?,
     onInspectPublisher: (String) -> Unit,
+    onFork: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val clipboard = LocalClipboardManager.current
@@ -1045,19 +1195,14 @@ private fun ManifestInspectorDialog(
                     onFilterByPublisher = if (applet.authorPubkey.length == 64) onInspectPublisher else null
                 )
                 Text(
-                    text = "Protocol: ${if (applet.isNsite) "NIP-5A Nsite" else "NIP-5D Napplet"} (Kind ${applet.kind})",
+                    text = "NIP-5A Nsite (Kind ${applet.kind}) • Slug: ${applet.dTag.ifBlank { "root" }}",
                     style = MaterialTheme.typography.labelMedium,
                     color = BreLightPink
                 )
                 Text(
-                    text = "Coordinate: ${naddr.take(26)}…",
+                    text = "Address: ${naddr.take(28)}…",
                     style = MaterialTheme.typography.labelSmall,
                     color = ZineBoneCream
-                )
-                Text(
-                    text = "d-tag: ${applet.dTag.ifBlank { "(root)" }} • Bridge: ${if (applet.enableNip07) "NIP-5D + NIP-07" else "Strict NIP-5D Sandbox"}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = BreGray100
                 )
                 Text(
                     text = "Blossom: ${applet.blossomServer}",
@@ -1068,19 +1213,24 @@ private fun ManifestInspectorDialog(
                     Text(
                         text = "/index.html SHA-256:\n${applet.indexSha256}",
                         style = MaterialTheme.typography.labelSmall,
-                        color = BreLightPink
+                        color = CyberMint
                     )
                 }
             }
         },
         confirmButton = {
-            TextButton(
-                onClick = {
-                    clipboard.setText(AnnotatedString(naddr))
-                    onDismiss()
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = onFork) {
+                    Text("Fork in Studio", color = BreDeepPink, fontWeight = FontWeight.Bold)
                 }
-            ) {
-                Text("Copy naddr", color = BreDeepPink)
+                TextButton(
+                    onClick = {
+                        clipboard.setText(AnnotatedString(naddr))
+                        onDismiss()
+                    }
+                ) {
+                    Text("Copy naddr", color = ZineBoneCream)
+                }
             }
         },
         dismissButton = {
@@ -1110,8 +1260,8 @@ private fun EmptyLauncherPlaceholder(
             } else {
                 stringResource(R.string.empty_launcher_title_ready)
             },
-            style = MaterialTheme.typography.headlineSmall,
-            color = BreWhite,
+            style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Black),
+            color = ZineBoneCream,
             textAlign = TextAlign.Center
         )
         Spacer(modifier = Modifier.height(8.dp))
@@ -1151,93 +1301,12 @@ private fun EmptyLauncherPlaceholder(
                     .testTag("empty_home_explore_button")
             ) {
                 Text(
-                    text = "Explore Gallery →",
-                    style = MaterialTheme.typography.labelLarge,
+                    text = "EXPLORE CHAOS FEED >>>",
+                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Black),
                     color = BreWhite,
                     modifier = Modifier.padding(horizontal = 18.dp, vertical = 12.dp)
                 )
             }
-        }
-    }
-}
-
-@Composable
-private fun LauncherBottomDock(
-    onOpenNotesComposer: () -> Unit,
-    onOpenRelayManager: () -> Unit,
-    onOpenStudio: () -> Unit
-) {
-    Surface(
-        shape = RoundedCornerShape(22.dp),
-        color = ObsidianCardGlass,
-        border = BorderStroke(1.dp, BrePinkDark2),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            DockActionItem(
-                icon = Icons.Default.EditNote,
-                label = "Post Note",
-                isPrimary = true,
-                testTag = "open_note_composer_button",
-                onClick = onOpenNotesComposer
-            )
-            DockActionItem(
-                icon = Icons.Default.Hub,
-                label = "Relays",
-                isPrimary = false,
-                testTag = "open_relays_dock_button",
-                onClick = onOpenRelayManager
-            )
-            DockActionItem(
-                icon = Icons.Default.Code,
-                label = "Studio",
-                isPrimary = false,
-                testTag = "open_studio_dock_button",
-                onClick = onOpenStudio
-            )
-        }
-    }
-}
-
-@Composable
-private fun DockActionItem(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    label: String,
-    isPrimary: Boolean,
-    testTag: String,
-    onClick: () -> Unit
-) {
-    Surface(
-        onClick = onClick,
-        shape = RoundedCornerShape(14.dp),
-        color = if (isPrimary) BreDeepPink else BreBlack,
-        border = if (isPrimary) null else BorderStroke(1.dp, BrePinkDark1),
-        modifier = Modifier
-            .minimumInteractiveComponentSize()
-            .testTag(testTag)
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = label,
-                tint = if (isPrimary) BreWhite else BreLightPink,
-                modifier = Modifier.size(18.dp)
-            )
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelLarge,
-                color = BreWhite
-            )
         }
     }
 }
