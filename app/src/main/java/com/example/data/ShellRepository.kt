@@ -13,6 +13,8 @@ import com.example.nostr.NostrEvent
 import com.example.nostr.NostrKinds
 import com.example.nostr.NsiteAddressResolver
 import com.example.nostr.NsiteSpamFilter
+import com.example.nostr.RelayBackgroundManager
+import com.example.nostr.RelayBackgroundStatus
 import com.example.nostr.RelayPoolClient
 import com.example.nostr.RelayMaintenanceSummary
 import com.example.nostr.RelayPublishSummary
@@ -22,7 +24,9 @@ import com.example.nostr.UnsignedNostrEvent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.first
@@ -82,6 +86,7 @@ class ShellRepository(
     autoBootstrap: Boolean = true
 ) {
     private val appContext = context.applicationContext
+    private val autoBootstrapEnabled = autoBootstrap
     private val repoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     val networkEngine: AdaptiveNetworkEngine = AdaptiveNetworkEngine(
@@ -103,6 +108,16 @@ class ShellRepository(
         signerManager = signerManager,
         prefsRepo = prefsRepo
     )
+
+    val relayBackgroundManager: RelayBackgroundManager = RelayBackgroundManager(
+        dao = dao,
+        networkEngine = networkEngine,
+        relayPool = relayPool,
+        managerScope = repoScope,
+        onRelayListDiscovered = { ev -> ingestNostrEvent(ev) }
+    )
+
+    val relayBackgroundStatusFlow: StateFlow<RelayBackgroundStatus> = relayBackgroundManager.status
 
     private val authorBlossomCache = ConcurrentHashMap<String, List<String>>()
     private val legacyNsitePathCache = ConcurrentHashMap<String, MutableMap<String, String>>()
@@ -304,8 +319,9 @@ class ShellRepository(
             }
         }
         requestMissingPublisherProfiles()
+        relayBackgroundManager.start()
         repoScope.launch {
-            runCatching { maintainRelaysAutoDiscoverAndDropDead() }
+            runCatching { relayBackgroundManager.runOptimizationCycle() }
         }
     }
 
@@ -493,11 +509,15 @@ class ShellRepository(
             )
         }
 
-        val now = System.currentTimeMillis()
-        val prevMaintain = lastAutoMaintainMs.get()
-        if (now - prevMaintain > 90_000L && lastAutoMaintainMs.compareAndSet(prevMaintain, now)) {
-            repoScope.launch {
-                runCatching { networkEngine.maintainRelays(cleanWrite + cleanRead) }
+        if (autoBootstrapEnabled || relayBackgroundManager.status.value.isRunning) {
+            val now = System.currentTimeMillis()
+            val prevMaintain = lastAutoMaintainMs.get()
+            if (now - prevMaintain > 90_000L && lastAutoMaintainMs.compareAndSet(prevMaintain, now)) {
+                repoScope.launch {
+                    runCatching {
+                        relayBackgroundManager.runOptimizationCycle(extraCandidates = cleanWrite + cleanRead)
+                    }
+                }
             }
         }
     }
@@ -1340,15 +1360,20 @@ class ShellRepository(
     }
 
     suspend fun probeAllNetworkHealth(): RelayMaintenanceSummary = withContext(Dispatchers.IO) {
-        val summary = networkEngine.maintainRelays()
+        val summary = relayBackgroundManager.runOptimizationCycle()
         networkEngine.probeAllConfiguredEndpoints()
         summary
     }
 
     suspend fun maintainRelaysAutoDiscoverAndDropDead(): RelayMaintenanceSummary =
         withContext(Dispatchers.IO) {
-            networkEngine.maintainRelays()
+            relayBackgroundManager.runOptimizationCycle()
         }
+
+    fun shutdown() {
+        relayBackgroundManager.stop()
+        repoScope.cancel()
+    }
 
     suspend fun publishRelayListNip65(): RelayPublishSummary = withContext(Dispatchers.IO) {
         val active = getActiveSigningAccount() ?: error("No active signing identity")

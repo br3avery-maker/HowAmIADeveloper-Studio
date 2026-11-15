@@ -1,0 +1,8 @@
+{
+  "id": "blogs",
+  "label": "Blogs",
+  "icon": "✍️",
+  "entry": "/index.html",
+  "dataFile": "/data/posts.json",
+  "description": "Decentralized NIP-5A indie blog & zine publication boilerplate."
+}

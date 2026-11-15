@@ -97,7 +97,7 @@ class NsiteProjectRepository(
         )
         dao.upsertProject(project)
 
-        val templateFiles = NsiteTemplates.buildFiles(templateKind, project.title)
+        val templateFiles = NsiteTemplates.buildFiles(appContext, templateKind, project.title)
         templateFiles.forEach { (path, content) ->
             writeFileInternal(projectId, path, content.toByteArray(Charsets.UTF_8))
         }

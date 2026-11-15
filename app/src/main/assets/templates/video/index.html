@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{TITLE}}</title>
+  <link rel="stylesheet" href="./css/style.css" />
+</head>
+<body>
+  <main class="container">
+    <header class="hero">
+      <span class="badge">VIDEO CHANNEL TEMPLATE</span>
+      <h1>{{TITLE}}</h1>
+      <p class="subtitle">Import <code>.mp4</code>/<code>.webm</code> assets via <strong>+ Asset</strong> or list Blossom video blobs in <code>/data/videos.json</code>.</p>
+    </header>
+
+    <section class="panel player-panel" aria-label="Video Player">
+      <video id="videoPlayer" controls playsinline preload="metadata"></video>
+      <div class="track-meta">
+        <div id="videoTitle" class="item-title">No video loaded</div>
+        <div id="videoDesc" class="muted">Pick a local video file or add entries in /data/videos.json</div>
+      </div>
+      <div class="row">
+        <label class="file-btn" for="localVideoPicker">Preview Local Video File</label>
+        <input id="localVideoPicker" type="file" accept="video/*" hidden />
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="section-head">
+        <h2>Channel Playlist</h2>
+        <span id="videoCount" class="mono-pill">0 videos</span>
+      </div>
+      <div id="videoList" class="stack-list"></div>
+    </section>
+  </main>
+  <script type="module" src="./js/videos.js"></script>
+</body>
+</html>

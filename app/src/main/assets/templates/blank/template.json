@@ -1,0 +1,8 @@
+{
+  "id": "blank",
+  "label": "Blank Shell",
+  "icon": "🌐",
+  "entry": "/index.html",
+  "dataFile": "",
+  "description": "Blank multi-file NIP-5A Nsite starter built in SovereignShell."
+}

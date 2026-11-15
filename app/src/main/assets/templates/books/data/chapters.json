@@ -1,0 +1,14 @@
+{
+  "bookTitle": "{{TITLE_JSON}}",
+  "author": "",
+  "schemaExample": {
+    "id": "chapter-1",
+    "title": "Chapter 1: Opening",
+    "summary": "Optional short note",
+    "paragraphs": [
+      "Replace this schema example in 'chapters' with your own chapters."
+    ],
+    "textPath": ""
+  },
+  "chapters": []
+}

@@ -1,7 +1,11 @@
 package com.example.data
 
+import android.content.Context
+import org.json.JSONObject
+
 enum class NsiteTemplateKind(
     val id: String,
+    val assetDir: String,
     val label: String,
     val iconGlyph: String,
     val subtitle: String,
@@ -10,6 +14,7 @@ enum class NsiteTemplateKind(
 ) {
     BLANK(
         id = "blank",
+        assetDir = "blank",
         label = "Blank Shell",
         iconGlyph = "🌐",
         subtitle = "Minimal HTML / CSS / JS starter",
@@ -18,6 +23,7 @@ enum class NsiteTemplateKind(
     ),
     MUSIC(
         id = "music",
+        assetDir = "music",
         label = "Music",
         iconGlyph = "🎵",
         subtitle = "Tracklist JSON + audio player slots",
@@ -26,6 +32,7 @@ enum class NsiteTemplateKind(
     ),
     BOOKS(
         id = "books",
+        assetDir = "books",
         label = "Books",
         iconGlyph = "📖",
         subtitle = "Chapters JSON + reader typography view",
@@ -34,6 +41,7 @@ enum class NsiteTemplateKind(
     ),
     BLOGS(
         id = "blogs",
+        assetDir = "blogs",
         label = "Blogs",
         iconGlyph = "✍️",
         subtitle = "Posts JSON, tag filter & article reader",
@@ -42,6 +50,7 @@ enum class NsiteTemplateKind(
     ),
     VIDEOS(
         id = "videos",
+        assetDir = "video",
         label = "Videos",
         iconGlyph = "🎬",
         subtitle = "Playlist JSON + responsive video player",
@@ -50,17 +59,126 @@ enum class NsiteTemplateKind(
     )
 }
 
+data class NsiteAssetTemplateDescriptor(
+    val id: String,
+    val assetDir: String,
+    val label: String,
+    val icon: String,
+    val entry: String,
+    val dataFile: String,
+    val description: String
+)
+
 object NsiteTemplates {
 
-    fun buildFiles(kind: NsiteTemplateKind, projectTitle: String): LinkedHashMap<String, String> {
-        val safeTitle = escapeHtml(projectTitle.trim().ifBlank { kind.label })
-        return when (kind) {
-            NsiteTemplateKind.BLANK -> buildBlankFiles(safeTitle)
-            NsiteTemplateKind.MUSIC -> buildMusicFiles(safeTitle)
-            NsiteTemplateKind.BOOKS -> buildBookFiles(safeTitle)
-            NsiteTemplateKind.BLOGS -> buildBlogFiles(safeTitle)
-            NsiteTemplateKind.VIDEOS -> buildVideoFiles(safeTitle)
+    fun listAvailableTemplates(context: Context): List<NsiteAssetTemplateDescriptor> {
+        val assetManager = context.assets
+        val rawEntries = runCatching { assetManager.list("templates")?.toList().orEmpty() }.getOrDefault(emptyList())
+        val dirs = rawEntries
+            .map { it.trim('/').substringBefore('/') }
+            .filter { it.isNotBlank() }
+            .distinct()
+        return dirs.mapNotNull { dir ->
+            val raw = runCatching {
+                assetManager.open("templates/$dir/template.json").bufferedReader(Charsets.UTF_8).use { it.readText() }
+            }.getOrNull() ?: return@mapNotNull null
+            runCatching {
+                val obj = JSONObject(raw)
+                NsiteAssetTemplateDescriptor(
+                    id = obj.optString("id", dir),
+                    assetDir = dir,
+                    label = obj.optString("label", dir.replaceFirstChar { it.uppercase() }),
+                    icon = obj.optString("icon", "🌐"),
+                    entry = obj.optString("entry", "/index.html"),
+                    dataFile = obj.optString("dataFile", ""),
+                    description = obj.optString("description", "")
+                )
+            }.getOrNull()
+        }.sortedBy { desc ->
+            NsiteTemplateKind.entries.indexOfFirst { it.assetDir == desc.assetDir }.let { if (it < 0) 99 else it }
         }
+    }
+
+    fun buildFiles(kind: NsiteTemplateKind, projectTitle: String): LinkedHashMap<String, String> =
+        buildFiles(context = null, kind = kind, projectTitle = projectTitle)
+
+    fun buildFiles(
+        context: Context?,
+        kind: NsiteTemplateKind,
+        projectTitle: String
+    ): LinkedHashMap<String, String> {
+        val rawTitle = projectTitle.trim().ifBlank { kind.label }
+        val safeTitleHtml = escapeHtml(rawTitle)
+        val safeTitleJson = escapeJsonString(rawTitle)
+
+        if (context != null) {
+            val loadedFromAssets = loadTemplateFromAssets(
+                context = context,
+                assetRoot = "templates/${kind.assetDir}",
+                safeTitleHtml = safeTitleHtml,
+                safeTitleJson = safeTitleJson
+            )
+            if (loadedFromAssets.isNotEmpty()) {
+                return loadedFromAssets
+            }
+        }
+
+        return when (kind) {
+            NsiteTemplateKind.BLANK -> buildBlankFiles(safeTitleHtml)
+            NsiteTemplateKind.MUSIC -> buildMusicFiles(safeTitleHtml, safeTitleJson)
+            NsiteTemplateKind.BOOKS -> buildBookFiles(safeTitleHtml, safeTitleJson)
+            NsiteTemplateKind.BLOGS -> buildBlogFiles(safeTitleHtml, safeTitleJson)
+            NsiteTemplateKind.VIDEOS -> buildVideoFiles(safeTitleHtml, safeTitleJson)
+        }
+    }
+
+    private fun loadTemplateFromAssets(
+        context: Context,
+        assetRoot: String,
+        safeTitleHtml: String,
+        safeTitleJson: String
+    ): LinkedHashMap<String, String> {
+        val result = LinkedHashMap<String, String>()
+        val assetManager = context.assets
+
+        fun walk(assetDir: String, relativePrefix: String) {
+            val entries = runCatching { assetManager.list(assetDir)?.toList().orEmpty() }.getOrDefault(emptyList())
+            for (name in entries.sorted()) {
+                val cleanName = name.trimStart('/')
+                if (cleanName == "template.json" && relativePrefix.isEmpty()) continue
+                val childAssetPath = "$assetDir/$cleanName"
+                val relPath = ("$relativePrefix/$cleanName").let {
+                    if (it.startsWith("/")) it else "/$it"
+                }
+                if (cleanName.contains('/')) {
+                    // Robolectric AssetManager.list returns nested relative paths directly; read file if openable
+                    val directContent = runCatching {
+                        assetManager.open(childAssetPath).bufferedReader(Charsets.UTF_8).use { it.readText() }
+                    }.getOrNull()
+                    if (directContent != null) {
+                        result[relPath] = directContent
+                            .replace("{{TITLE_JSON}}", safeTitleJson)
+                            .replace("{{TITLE}}", safeTitleHtml)
+                        continue
+                    }
+                }
+                val subEntries = runCatching { assetManager.list(childAssetPath)?.toList().orEmpty() }.getOrDefault(emptyList())
+                if (subEntries.isNotEmpty()) {
+                    walk(childAssetPath, relPath)
+                } else {
+                    val content = runCatching {
+                        assetManager.open(childAssetPath).bufferedReader(Charsets.UTF_8).use { it.readText() }
+                    }.getOrNull() ?: continue
+                    val interpolated = content
+                        .replace("{{TITLE_JSON}}", safeTitleJson)
+                        .replace("{{TITLE}}", safeTitleHtml)
+                    result[relPath] = interpolated
+                }
+            }
+        }
+
+        walk(assetRoot, "")
+        return result
     }
 
     private fun escapeHtml(raw: String): String = buildString(raw.length) {
@@ -72,6 +190,25 @@ object NsiteTemplates {
                 '"' -> append("&quot;")
                 '\'' -> append("&#39;")
                 else -> append(ch)
+            }
+        }
+    }
+
+    private fun escapeJsonString(raw: String): String = buildString(raw.length) {
+        raw.forEach { ch ->
+            when (ch) {
+                '\\' -> append("\\\\")
+                '"' -> append("\\\"")
+                '\n' -> append("\\n")
+                '\r' -> append("\\r")
+                '\t' -> append("\\t")
+                '\b' -> append("\\b")
+                '\u000C' -> append("\\f")
+                else -> if (ch.code < 0x20) {
+                    append("\\u%04x".format(ch.code))
+                } else {
+                    append(ch)
+                }
             }
         }
     }
@@ -129,7 +266,7 @@ nostrBtn?.addEventListener('click', async () => {
         """.trimIndent()
     )
 
-    private fun buildMusicFiles(safeTitle: String): LinkedHashMap<String, String> = linkedMapOf(
+    private fun buildMusicFiles(safeTitle: String, safeTitleJson: String): LinkedHashMap<String, String> = linkedMapOf(
         "/index.html" to """
 <!DOCTYPE html>
 <html lang="en">
@@ -177,7 +314,7 @@ nostrBtn?.addEventListener('click', async () => {
         "/css/style.css" to SHARED_TEMPLATE_CSS,
         "/data/tracks.json" to """
 {
-  "releaseTitle": "$safeTitle",
+  "releaseTitle": "$safeTitleJson",
   "artist": "",
   "releaseNote": "Add objects to 'tracks' using relative './assets/file.mp3' paths or Blossom URLs.",
   "schemaExample": {
@@ -281,7 +418,7 @@ init();
         """.trimIndent()
     )
 
-    private fun buildBookFiles(safeTitle: String): LinkedHashMap<String, String> = linkedMapOf(
+    private fun buildBookFiles(safeTitle: String, safeTitleJson: String): LinkedHashMap<String, String> = linkedMapOf(
         "/index.html" to """
 <!DOCTYPE html>
 <html lang="en">
@@ -322,7 +459,7 @@ init();
         "/css/style.css" to SHARED_TEMPLATE_CSS,
         "/data/chapters.json" to """
 {
-  "bookTitle": "$safeTitle",
+  "bookTitle": "$safeTitleJson",
   "author": "",
   "schemaExample": {
     "id": "chapter-1",
@@ -424,7 +561,7 @@ init();
         """.trimIndent()
     )
 
-    private fun buildBlogFiles(safeTitle: String): LinkedHashMap<String, String> = linkedMapOf(
+    private fun buildBlogFiles(safeTitle: String, safeTitleJson: String): LinkedHashMap<String, String> = linkedMapOf(
         "/index.html" to """
 <!DOCTYPE html>
 <html lang="en">
@@ -468,7 +605,7 @@ init();
         "/css/style.css" to SHARED_TEMPLATE_CSS,
         "/data/posts.json" to """
 {
-  "blogTitle": "$safeTitle",
+  "blogTitle": "$safeTitleJson",
   "schemaExample": {
     "slug": "first-dispatch",
     "title": "First Dispatch",
@@ -595,7 +732,7 @@ init();
         """.trimIndent()
     )
 
-    private fun buildVideoFiles(safeTitle: String): LinkedHashMap<String, String> = linkedMapOf(
+    private fun buildVideoFiles(safeTitle: String, safeTitleJson: String): LinkedHashMap<String, String> = linkedMapOf(
         "/index.html" to """
 <!DOCTYPE html>
 <html lang="en">
@@ -640,7 +777,7 @@ init();
         "/css/style.css" to SHARED_TEMPLATE_CSS,
         "/data/videos.json" to """
 {
-  "channelTitle": "$safeTitle",
+  "channelTitle": "$safeTitleJson",
   "schemaExample": {
     "title": "Clip 01",
     "src": "./assets/clip-01.mp4",

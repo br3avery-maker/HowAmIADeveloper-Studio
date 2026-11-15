@@ -12,6 +12,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.net.URI
 import java.util.concurrent.ConcurrentHashMap
@@ -59,6 +61,10 @@ class AdaptiveNetworkEngine(
     private val authorNip65Cache = ConcurrentHashMap<String, AuthorRelayPreferences>()
     private val discoveredCandidates = ConcurrentHashMap<String, String>()
     private val lastProbeAttemptMs = ConcurrentHashMap<String, Long>()
+    private val maintenanceMutex = Mutex()
+
+    suspend fun <T> withMaintenanceLock(block: suspend () -> T): T =
+        maintenanceMutex.withLock { block() }
 
     init {
         relayPool.healthObserver = { url, success, latencyMs, errorReason ->
@@ -305,6 +311,15 @@ class AdaptiveNetworkEngine(
         minKeepRelays: Int = 2,
         nowMs: Long = System.currentTimeMillis()
     ): Pair<List<String>, List<String>> = withContext(Dispatchers.IO) {
+        maintenanceMutex.withLock {
+            dropDeadRelaysAndConnectionsLocked(minKeepRelays = minKeepRelays, nowMs = nowMs)
+        }
+    }
+
+    internal suspend fun dropDeadRelaysAndConnectionsLocked(
+        minKeepRelays: Int = 2,
+        nowMs: Long = System.currentTimeMillis()
+    ): Pair<List<String>, List<String>> = withContext(Dispatchers.IO) {
         val configured = dao.getRelaysList()
         val healthMap = dao.getAllRelayHealth().associateBy { it.url }
         val liveMap = relayPool.relayStatuses.value
@@ -347,6 +362,20 @@ class AdaptiveNetworkEngine(
      * filters out payment-gated or unreachable nodes, and adopts responsive relays up to [maxConfiguredCap].
      */
     suspend fun autoDiscoverAndAdoptRelays(
+        extraCandidates: Collection<String> = emptyList(),
+        maxConfiguredCap: Int = 10,
+        maxProbesPerPass: Int = 6
+    ): List<String> = withContext(Dispatchers.IO) {
+        maintenanceMutex.withLock {
+            autoDiscoverAndAdoptRelaysLocked(
+                extraCandidates = extraCandidates,
+                maxConfiguredCap = maxConfiguredCap,
+                maxProbesPerPass = maxProbesPerPass
+            )
+        }
+    }
+
+    internal suspend fun autoDiscoverAndAdoptRelaysLocked(
         extraCandidates: Collection<String> = emptyList(),
         maxConfiguredCap: Int = 10,
         maxProbesPerPass: Int = 6
@@ -438,31 +467,33 @@ class AdaptiveNetworkEngine(
     suspend fun maintainRelays(
         extraCandidates: Collection<String> = emptyList()
     ): RelayMaintenanceSummary = withContext(Dispatchers.IO) {
-        val (droppedUrls, closedSocketUrls) = dropDeadRelaysAndConnections()
-        val discoveredUrls = autoDiscoverAndAdoptRelays(extraCandidates = extraCandidates)
-        val relays = dao.getRelaysList()
-        val now = System.currentTimeMillis()
-        val healthMap = dao.getAllRelayHealth().associateBy { it.url }
-        var probed = 0
-        relays.forEach { entity ->
-            val lastProbed = healthMap[entity.url]?.lastProbedAt ?: 0L
-            if (now - lastProbed > 120_000L) {
-                probeRelayCapabilities(entity.url)
-                probed++
+        maintenanceMutex.withLock {
+            val (droppedUrls, closedSocketUrls) = dropDeadRelaysAndConnectionsLocked()
+            val discoveredUrls = autoDiscoverAndAdoptRelaysLocked(extraCandidates = extraCandidates)
+            val relays = dao.getRelaysList()
+            val now = System.currentTimeMillis()
+            val healthMap = dao.getAllRelayHealth().associateBy { it.url }
+            var probed = 0
+            relays.forEach { entity ->
+                val lastProbed = healthMap[entity.url]?.lastProbedAt ?: 0L
+                if (now - lastProbed > 120_000L) {
+                    probeRelayCapabilities(entity.url)
+                    probed++
+                }
             }
+            val liveStatuses = relayPool.relayStatuses.value
+            val healthyCount = relays.count { entity ->
+                liveStatuses[entity.url]?.status == RelayConnectionStatus.CONNECTED ||
+                    !isRelayDead(dao.getRelayHealth(entity.url), liveStatuses[entity.url], now)
+            }
+            RelayMaintenanceSummary(
+                discoveredUrls = discoveredUrls,
+                droppedUrls = droppedUrls,
+                closedSocketUrls = closedSocketUrls,
+                probedCount = probed,
+                healthyCount = healthyCount
+            )
         }
-        val liveStatuses = relayPool.relayStatuses.value
-        val healthyCount = relays.count { entity ->
-            liveStatuses[entity.url]?.status == RelayConnectionStatus.CONNECTED ||
-                !isRelayDead(dao.getRelayHealth(entity.url), liveStatuses[entity.url], now)
-        }
-        RelayMaintenanceSummary(
-            discoveredUrls = discoveredUrls,
-            droppedUrls = droppedUrls,
-            closedSocketUrls = closedSocketUrls,
-            probedCount = probed,
-            healthyCount = healthyCount
-        )
     }
 
     /**

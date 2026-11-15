@@ -92,6 +92,7 @@ fun SovereignShellRoot(
     val auditLog by vm.auditLog.collectAsStateWithLifecycle()
     val signerPolicies by vm.signerPolicies.collectAsStateWithLifecycle()
     val connectedRelayCount by vm.connectedRelayCount.collectAsStateWithLifecycle()
+    val relayBackgroundStatus by vm.relayBackgroundStatus.collectAsStateWithLifecycle()
 
     // Wire NIP-55 Android Intent launcher
     val nip55Launcher = rememberLauncherForActivityResult(
@@ -354,7 +355,11 @@ fun SovereignShellRoot(
                                 },
                                 onPublishProject = { vm.publishActiveProject() },
                                 onCopiedUrl = { vm.showBanner("Copied live Nsite URL") },
-                                onBack = { vm.navigateBack() }
+                                onBack = { vm.navigateBack() },
+                                relays = managedRelays,
+                                relayBackgroundStatus = relayBackgroundStatus,
+                                onMaintainRelays = { vm.maintainRelaysAutoDiscoverAndDropDead() },
+                                onCopiedInspectorValue = { label -> vm.showBanner("Copied $label to clipboard") }
                             )
                         }
 
@@ -376,7 +381,8 @@ fun SovereignShellRoot(
                                 onPublishNip65AndBlossom = { vm.publishNip65AndBlossomLists() },
                                 onOpenIdentityVault = { vm.navigateTo(ShellDestination.VaultAndAudit) },
                                 onOpenAccountMenu = { scope.launch { drawerState.open() } },
-                                onBack = { vm.navigateBack() }
+                                onBack = { vm.navigateBack() },
+                                relayBackgroundStatus = relayBackgroundStatus
                             )
                         }
 

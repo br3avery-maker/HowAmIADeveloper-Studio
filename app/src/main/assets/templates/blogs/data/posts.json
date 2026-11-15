@@ -1,0 +1,15 @@
+{
+  "blogTitle": "{{TITLE_JSON}}",
+  "schemaExample": {
+    "slug": "first-dispatch",
+    "title": "First Dispatch",
+    "date": "2026-11-15",
+    "tags": ["nostr", "nsite"],
+    "summary": "Short summary shown on the post index.",
+    "paragraphs": [
+      "Paragraph 1 of your post.",
+      "Paragraph 2 of your post."
+    ]
+  },
+  "posts": []
+}

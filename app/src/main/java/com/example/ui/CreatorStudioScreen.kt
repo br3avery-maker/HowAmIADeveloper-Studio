@@ -45,6 +45,7 @@ import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.UploadFile
@@ -88,6 +89,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.InstalledAppletEntity
+import com.example.data.ManagedRelayItem
 import com.example.data.NsiteProjectEntity
 import com.example.data.NsiteProjectFileEntity
 import com.example.data.NsiteTemplateKind
@@ -98,6 +100,7 @@ import com.example.data.VaultAccountEntity
 import com.example.nostr.DeliveryVerificationStage
 import com.example.nostr.ExternalSiteLauncher
 import com.example.nostr.NostrKinds
+import com.example.nostr.RelayBackgroundStatus
 import com.example.ui.theme.BreBlack
 import com.example.ui.theme.BreDeepPink
 import com.example.ui.theme.BreGray100
@@ -163,7 +166,11 @@ fun CreatorStudioScreen(
     onPreviewBridgeCall: suspend (String, String, JSONObject) -> Any?,
     onPublishProject: () -> Unit,
     onCopiedUrl: () -> Unit,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    relays: List<ManagedRelayItem> = emptyList(),
+    relayBackgroundStatus: RelayBackgroundStatus = RelayBackgroundStatus(),
+    onMaintainRelays: () -> Unit = {},
+    onCopiedInspectorValue: (String) -> Unit = { onCopiedUrl() }
 ) {
     BackHandler(onBack = onBack)
 
@@ -175,6 +182,7 @@ fun CreatorStudioScreen(
     var showNewProjectDialog by remember { mutableStateOf(false) }
     var showNewFileDialog by remember { mutableStateOf(false) }
     var showForkAddressDialog by remember { mutableStateOf(false) }
+    var showInspectorSheet by rememberSaveable { mutableStateOf(false) }
     var previewReloadNonce by remember { mutableIntStateOf(0) }
 
     // Metadata buffers synced to activeProject
@@ -264,7 +272,10 @@ fun CreatorStudioScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
                     IconButton(
                         onClick = onBack,
                         modifier = Modifier
@@ -277,26 +288,33 @@ fun CreatorStudioScreen(
                             tint = ZineBoneCream
                         )
                     }
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = "LAUNCH STUDIO",
                             style = MaterialTheme.typography.headlineSmall.copy(
                                 fontWeight = FontWeight.Black,
                                 letterSpacing = 1.2.sp
                             ),
-                            color = ZineBoneCream
+                            color = ZineBoneCream,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                         Text(
                             text = activeAccount?.let { "Publishing as ${it.displayName.ifBlank { it.npub.take(12) }}" }
                                 ?: "Select a signing identity",
                             style = MaterialTheme.typography.labelSmall,
-                            color = BreLightPink
+                            color = BreLightPink,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
 
-                // Project Switcher Pill + New Project Button
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                // Project Switcher Pill + Inspector Button + New Project Button
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
                     Box {
                         Surface(
                             onClick = { projectMenuExpanded = true },
@@ -307,10 +325,10 @@ fun CreatorStudioScreen(
                         ) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
                             ) {
                                 Text(
-                                    text = activeProject?.title?.take(16) ?: "Project",
+                                    text = activeProject?.title?.take(12) ?: "Project",
                                     style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
                                     color = BreWhite,
                                     maxLines = 1
@@ -368,9 +386,23 @@ fun CreatorStudioScreen(
                     }
 
                     IconButton(
+                        onClick = { showInspectorSheet = true },
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .testTag("studio_inspector_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Info,
+                            contentDescription = "Open Project Inspector",
+                            tint = CyberMint
+                        )
+                    }
+
+                    IconButton(
                         onClick = { showNewProjectDialog = true },
                         modifier = Modifier
-                            .size(38.dp)
+                            .minimumInteractiveComponentSize()
+                            .size(40.dp)
                             .clip(RoundedCornerShape(10.dp))
                             .background(BreDeepPink)
                             .testTag("studio_new_project_button")
@@ -1152,6 +1184,23 @@ fun CreatorStudioScreen(
                     Text("Cancel", color = BreGray100)
                 }
             }
+        )
+    }
+
+    if (showInspectorSheet) {
+        CreatorInspectorBottomSheet(
+            activeAccount = activeAccount,
+            activeProject = activeProject,
+            projectFiles = projectFiles,
+            blossomServer = blossomServer,
+            relays = relays,
+            relayBackgroundStatus = relayBackgroundStatus,
+            latestReport = latestReport,
+            latestVerification = latestVerification,
+            isWorking = isWorking,
+            onMaintainRelays = onMaintainRelays,
+            onCopyText = { label, _ -> onCopiedInspectorValue(label) },
+            onDismiss = { showInspectorSheet = false }
         )
     }
 }

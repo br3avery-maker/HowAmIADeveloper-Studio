@@ -1,0 +1,8 @@
+{
+  "id": "music",
+  "label": "Music",
+  "icon": "🎵",
+  "entry": "/index.html",
+  "dataFile": "/data/tracks.json",
+  "description": "Decentralized NIP-5A music & audio release boilerplate on Blossom."
+}

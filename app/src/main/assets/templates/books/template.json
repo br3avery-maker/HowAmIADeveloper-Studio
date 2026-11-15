@@ -1,0 +1,8 @@
+{
+  "id": "books",
+  "label": "Books",
+  "icon": "📖",
+  "entry": "/index.html",
+  "dataFile": "/data/chapters.json",
+  "description": "Decentralized NIP-5A book & long-form chapter reader boilerplate."
+}

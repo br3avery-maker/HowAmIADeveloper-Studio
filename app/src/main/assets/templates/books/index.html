@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{TITLE}}</title>
+  <link rel="stylesheet" href="./css/style.css" />
+</head>
+<body>
+  <main class="container">
+    <header class="hero">
+      <span class="badge">BOOK / READER TEMPLATE</span>
+      <h1>{{TITLE}}</h1>
+      <p class="subtitle">Add chapters inside <code>/data/chapters.json</code> or import standalone chapter <code>.txt</code>/<code>.html</code> files via <strong>+ Asset</strong>.</p>
+      <div class="row">
+        <button id="fontSmaller" type="button" class="secondary">A-</button>
+        <button id="fontLarger" type="button" class="secondary">A+</button>
+        <span id="chapterCount" class="mono-pill">0 chapters</span>
+      </div>
+    </header>
+
+    <section class="panel">
+      <h2>Table of Contents</h2>
+      <div id="tocList" class="toc-row"></div>
+    </section>
+
+    <article class="panel reader-surface" id="readerSurface">
+      <h2 id="chapterTitle">No chapter loaded</h2>
+      <p id="chapterMeta" class="muted"></p>
+      <div id="chapterBody" class="prose"></div>
+    </article>
+  </main>
+  <script type="module" src="./js/reader.js"></script>
+</body>
+</html>

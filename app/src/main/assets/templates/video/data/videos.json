@@ -1,0 +1,11 @@
+{
+  "channelTitle": "{{TITLE_JSON}}",
+  "schemaExample": {
+    "title": "Clip 01",
+    "src": "./assets/clip-01.mp4",
+    "poster": "./assets/poster.jpg",
+    "duration": "02:15",
+    "description": "Uploaded via Blossom SHA-256"
+  },
+  "videos": []
+}

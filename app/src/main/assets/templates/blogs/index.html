@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{TITLE}}</title>
+  <link rel="stylesheet" href="./css/style.css" />
+</head>
+<body>
+  <main class="container">
+    <header class="hero">
+      <span class="badge">BLOG / ZINE TEMPLATE</span>
+      <h1>{{TITLE}}</h1>
+      <p class="subtitle">Write posts in <code>/data/posts.json</code> with titles, dates, tags, and body paragraphs, then publish cleanly over NIP-5A.</p>
+    </header>
+
+    <section class="panel">
+      <div class="section-head">
+        <h2>Tags</h2>
+        <span id="postCount" class="mono-pill">0 posts</span>
+      </div>
+      <div id="tagBar" class="toc-row"></div>
+    </section>
+
+    <section id="postFeed" class="stack-list"></section>
+
+    <article class="panel reader-surface" id="articlePanel" hidden>
+      <div class="row">
+        <button id="closeArticleBtn" type="button" class="secondary">Back to Posts</button>
+      </div>
+      <h2 id="articleTitle"></h2>
+      <p id="articleMeta" class="muted"></p>
+      <div id="articleBody" class="prose"></div>
+    </article>
+  </main>
+  <script type="module" src="./js/blog.js"></script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+{
+  "id": "video",
+  "label": "Videos",
+  "icon": "🎬",
+  "entry": "/index.html",
+  "dataFile": "/data/videos.json",
+  "description": "Decentralized NIP-5A video channel boilerplate hosted on Blossom."
+}

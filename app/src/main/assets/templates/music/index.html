@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{TITLE}}</title>
+  <link rel="stylesheet" href="./css/style.css" />
+</head>
+<body>
+  <main class="container">
+    <header class="hero">
+      <span class="badge">AUDIO / MUSIC TEMPLATE</span>
+      <h1>{{TITLE}}</h1>
+      <p class="subtitle">Import audio files via Studio <strong>+ Asset</strong> (<code>/assets/track-01.mp3</code>) or paste Blossom URLs inside <code>/data/tracks.json</code>.</p>
+    </header>
+
+    <section class="panel player-panel" aria-label="Audio Player">
+      <div class="now-playing">
+        <div class="cover-slot" id="coverSlot">♪</div>
+        <div class="track-meta">
+          <div id="nowTitle" class="item-title">Select or preview a track</div>
+          <div id="nowArtist" class="muted">No track loaded yet</div>
+        </div>
+      </div>
+      <audio id="audioPlayer" controls preload="metadata"></audio>
+      <div class="row">
+        <label class="file-btn" for="localAudioPicker">Preview Local Audio File</label>
+        <input id="localAudioPicker" type="file" accept="audio/*" hidden />
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="section-head">
+        <h2>Tracklist</h2>
+        <span id="trackCount" class="mono-pill">0 tracks</span>
+      </div>
+      <div id="trackList" class="stack-list"></div>
+    </section>
+  </main>
+  <script type="module" src="./js/music.js"></script>
+</body>
+</html>

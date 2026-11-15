@@ -1,25 +1,43 @@
 package com.example
 
 import android.content.Context
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollToNode
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.CatalogStacker
 import com.example.data.CuratedBookmarkEntity
 import com.example.data.GalleryCategory
 import com.example.data.InstalledAppletEntity
+import com.example.data.ManagedRelayItem
+import com.example.data.NsiteProjectEntity
+import com.example.data.NsiteProjectFileEntity
 import com.example.data.ShellRepository
 import com.example.data.VariantRelation
+import com.example.data.VaultAccountEntity
 import com.example.nostr.ExternalSiteLauncher
 import com.example.nostr.KeyVaultManager
 import com.example.nostr.NostrCrypto
 import com.example.nostr.NostrEvent
 import com.example.nostr.NostrKinds
 import com.example.nostr.NsiteSpamFilter
+import com.example.nostr.RelayBackgroundStatus
+import com.example.nostr.RelayConnectionStatus
+import com.example.nostr.RelayStatusInfo
+import com.example.ui.CreatorStudioScreen
 import com.example.ui.injectRuntimeBootstrap
+import com.example.ui.theme.MyApplicationTheme
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -28,6 +46,9 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])
 class ExampleRobolectricTest {
+
+    @get:Rule
+    val composeRule = createComposeRule()
 
     @Test
     fun appNameAndVaultAndNip04RoundTrip_succeeds() {
@@ -474,6 +495,143 @@ class ExampleRobolectricTest {
         } finally {
             db.close()
         }
+    }
+
+    @Test
+    fun creatorStudio_inspectorBottomSheet_displaysMetadataFileHashesAndRelays() {
+        val kp = NostrCrypto.generateKeyPair()
+        val account = VaultAccountEntity(
+            pubkeyHex = kp.pubKeyHex,
+            npub = kp.npub,
+            encryptedPrivKeyBase64 = "",
+            ivBase64 = "",
+            displayName = "Zine Maker",
+            bio = ""
+        )
+        val project = NsiteProjectEntity(
+            projectId = "proj-1",
+            ownerPubkeyHex = kp.pubKeyHex,
+            title = "Deepink Radio",
+            dTag = "deepink-radio",
+            targetKind = NostrKinds.NSITE_NAMED,
+            description = "Music Nsite starter",
+            entryPath = "/index.html",
+            sourceType = "SCRATCH"
+        )
+        val htmlText = "<!DOCTYPE html><html><body>Radio</body></html>"
+        val tracksJson = """{"tracks":[]}"""
+        val htmlSha = NostrCrypto.sha256Hex(htmlText)
+        val jsonSha = NostrCrypto.sha256Hex(tracksJson)
+        val files = listOf(
+            NsiteProjectFileEntity(
+                projectId = "proj-1",
+                relativePath = "/index.html",
+                mimeType = "text/html",
+                isBinary = false,
+                sizeBytes = htmlText.length.toLong(),
+                sha256 = htmlSha,
+                textContent = htmlText
+            ),
+            NsiteProjectFileEntity(
+                projectId = "proj-1",
+                relativePath = "/data/tracks.json",
+                mimeType = "application/json",
+                isBinary = false,
+                sizeBytes = tracksJson.length.toLong(),
+                sha256 = jsonSha,
+                textContent = tracksJson
+            )
+        )
+        val expectedAggregate = NostrEvent.computeNip5aAggregateHash(
+            mapOf("/index.html" to htmlSha, "/data/tracks.json" to jsonSha)
+        )
+        val relays = listOf(
+            ManagedRelayItem(
+                url = "wss://relay.damus.io",
+                readEnabled = true,
+                writeEnabled = true,
+                statusInfo = RelayStatusInfo(
+                    url = "wss://relay.damus.io",
+                    status = RelayConnectionStatus.CONNECTED,
+                    latencyMs = 38L
+                )
+            )
+        )
+        val bgStatus = RelayBackgroundStatus(
+            isRunning = true,
+            cycleCount = 4,
+            discoveredFromNip01Count = 7,
+            adoptedRelaysCount = 2,
+            droppedUnresponsiveCount = 1,
+            averageLatencyMs = 38L,
+            lastSummary = "+7 NIP-01 hints • +2 adopted • -1 dropped • 38ms avg"
+        )
+        var maintainClicks = 0
+
+        composeRule.setContent {
+            MyApplicationTheme {
+                CreatorStudioScreen(
+                    activeAccount = account,
+                    projects = listOf(project),
+                    activeProject = project,
+                    projectFiles = files,
+                    selectedFilePath = "/index.html",
+                    blossomServer = "https://blossom.primal.net",
+                    isWorking = false,
+                    latestReport = null,
+                    latestVerification = null,
+                    onSelectProject = {},
+                    onCreateScratchProject = { _, _, _, _ -> },
+                    onDeleteProject = {},
+                    onImportHtmlUri = {},
+                    onImportZipUri = {},
+                    onImportFolderUri = {},
+                    onForkByAddress = {},
+                    onSelectFile = {},
+                    onSaveProjectMetadata = { _, _, _, _, _ -> },
+                    onSaveTextFile = { _, _, _ -> },
+                    onCreateNewFile = { _, _ -> },
+                    onImportAssetFile = { _, _ -> },
+                    onRenameFile = { _, _ -> },
+                    onDeleteFile = {},
+                    resolvePreviewAsset = { _, _, _, _ -> null },
+                    onPreviewBridgeCall = { _, _, _ -> null },
+                    onPublishProject = {},
+                    onCopiedUrl = {},
+                    onBack = {},
+                    relays = relays,
+                    relayBackgroundStatus = bgStatus,
+                    onMaintainRelays = { maintainClicks++ }
+                )
+            }
+        }
+
+        // Open Inspector bottom sheet from compact header icon
+        composeRule.onNodeWithTag("studio_inspector_button").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("studio_inspector_sheet").assertIsDisplayed()
+
+        // Metadata tab verifies NIP-5A kind, d-tag, and live aggregate hash
+        composeRule.onNodeWithText("35128 (Named Subdomain Nsite)").assertIsDisplayed()
+        composeRule.onNodeWithTag("inspector_aggregate_hash_value").assertTextContains(expectedAggregate)
+
+        // File Hashes tab lists exact SHA-256 hashes (scroll LazyColumn for compact viewports)
+        composeRule.onNodeWithTag("inspector_tab_hashes").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("sha256:$htmlSha").assertIsDisplayed()
+        composeRule.onNodeWithTag("inspector_file_hash_list")
+            .performScrollToNode(hasText("sha256:$jsonSha"))
+        composeRule.onNodeWithText("sha256:$jsonSha").assertIsDisplayed()
+
+        // Relays tab displays RelayBackgroundStatus telemetry and triggers optimization
+        composeRule.onNodeWithTag("inspector_tab_relays").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("inspector_relay_bg_card").assertIsDisplayed()
+        composeRule.onNodeWithTag("inspector_optimize_relays_btn").performClick()
+        assertEquals(1, maintainClicks)
+        composeRule.onNodeWithTag("inspector_relay_status_list")
+            .performScrollToNode(hasText("wss://relay.damus.io"))
+        composeRule.onNodeWithText("wss://relay.damus.io").assertIsDisplayed()
     }
 }
 

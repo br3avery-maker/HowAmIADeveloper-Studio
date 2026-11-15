@@ -42,6 +42,7 @@ import androidx.compose.ui.unit.sp
 import com.example.data.ManagedBlossomItem
 import com.example.data.ManagedRelayItem
 import com.example.nostr.AdaptiveNetworkEngine
+import com.example.nostr.RelayBackgroundStatus
 import com.example.nostr.RelayConnectionStatus
 import com.example.ui.theme.*
 import kotlin.math.roundToInt
@@ -63,7 +64,8 @@ fun RelayManagementScreen(
     onPublishNip65AndBlossom: () -> Unit,
     onOpenIdentityVault: () -> Unit,
     onOpenAccountMenu: () -> Unit,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    relayBackgroundStatus: RelayBackgroundStatus = RelayBackgroundStatus()
 ) {
     BackHandler(onBack = onBack)
 
@@ -424,6 +426,16 @@ fun RelayManagementScreen(
                         fontSize = 12.sp
                     )
                 }
+
+                Text(
+                    text = "BG Optimizer: ${if (relayBackgroundStatus.isRunning) "ACTIVE" else "STANDBY"} • Cycle #${relayBackgroundStatus.cycleCount} • ${relayBackgroundStatus.lastSummary}",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = BreLightPink,
+                    modifier = Modifier
+                        .padding(horizontal = 4.dp)
+                        .testTag("relay_bg_status_text")
+                )
             }
         }
 

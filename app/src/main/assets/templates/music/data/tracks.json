@@ -1,0 +1,14 @@
+{
+  "releaseTitle": "{{TITLE_JSON}}",
+  "artist": "",
+  "releaseNote": "Add objects to 'tracks' using relative './assets/file.mp3' paths or Blossom URLs.",
+  "schemaExample": {
+    "title": "Track 01",
+    "artist": "Creator Name",
+    "src": "./assets/track-01.mp3",
+    "duration": "03:42",
+    "cover": "./assets/cover.jpg",
+    "notes": ""
+  },
+  "tracks": []
+}

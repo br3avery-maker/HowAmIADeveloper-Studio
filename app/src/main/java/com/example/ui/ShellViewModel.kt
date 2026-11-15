@@ -33,6 +33,7 @@ import com.example.data.WallpaperStyle
 import com.example.nostr.NostrEvent
 import com.example.nostr.NostrKinds
 import com.example.nostr.PendingSignRequest
+import com.example.nostr.RelayBackgroundStatus
 import com.example.nostr.RelayConnectionStatus
 import com.example.nostr.SignDecision
 import com.example.nostr.UnsignedNostrEvent
@@ -279,6 +280,8 @@ class ShellViewModel @JvmOverloads constructor(
         arr.first().count { it.statusInfo.status == RelayConnectionStatus.CONNECTED }
     }.conflate().flowOn(Dispatchers.Default)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
+    val relayBackgroundStatus: StateFlow<RelayBackgroundStatus> = repository.relayBackgroundStatusFlow
 
     init {
         viewModelScope.launch(Dispatchers.IO) {
@@ -1474,6 +1477,11 @@ class ShellViewModel @JvmOverloads constructor(
             enableNip07 = true
         )
         return handleAppletBridgeCall(syntheticApplet, protocolLabel, type, payload)
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        repository.shutdown()
     }
 
     class Factory(private val application: Application) : ViewModelProvider.Factory {

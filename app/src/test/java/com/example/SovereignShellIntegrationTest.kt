@@ -781,8 +781,16 @@ class SovereignShellIntegrationTest {
                 NsiteTemplateKind.VIDEOS to Pair("/data/videos.json", "videos")
             )
 
+            val discoveredTemplates = com.example.data.NsiteTemplates.listAvailableTemplates(context)
+            val discoveredDirs = discoveredTemplates.map { it.assetDir }.toSet()
+            assertTrue("assets/templates/music missing", "music" in discoveredDirs)
+            assertTrue("assets/templates/blogs missing", "blogs" in discoveredDirs)
+            assertTrue("assets/templates/video missing", "video" in discoveredDirs)
+            assertTrue("assets/templates/books missing", "books" in discoveredDirs)
+            assertTrue("assets/templates/blank missing", "blank" in discoveredDirs)
+
             for (templateKind in NsiteTemplateKind.entries) {
-                val rawTitle = "Chaos <${templateKind.label}> & Co"
+                val rawTitle = "Chaos \"${templateKind.label}\" <A&B>"
                 val project = repo.projectRepository.createScratchProject(
                     ownerPubkeyHex = creator.pubkeyHex,
                     title = rawTitle,
@@ -808,7 +816,7 @@ class SovereignShellIntegrationTest {
                 assertEquals("text/html", indexAsset!!.mimeType)
                 val htmlText = String(indexAsset.bytes, Charsets.UTF_8)
                 assertTrue("<!DOCTYPE html> must lead $templateKind", htmlText.startsWith("<!DOCTYPE html>"))
-                assertTrue("HTML title must be escaped", htmlText.contains("&lt;") && htmlText.contains("&amp;"))
+                assertTrue("HTML title must be escaped", htmlText.contains("&lt;A&amp;B&gt;") && htmlText.contains("&quot;"))
 
                 val cssAsset = repo.projectRepository.resolveProjectPreviewAsset(
                     projectId = project.projectId,
@@ -839,6 +847,90 @@ class SovereignShellIntegrationTest {
                 }
             }
         } finally {
+            db.close()
+        }
+    }
+
+    @Test
+    fun relayBackgroundManager_queriesNip01RelayLists_monitorsLatency_andDropsDeadConnections() = runBlocking {
+        val db = Room.inMemoryDatabaseBuilder(context, ShellDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        val seedRelay = EmbeddedNostrRelayServer()
+        val discoveredRelay = EmbeddedNostrRelayServer()
+        seedRelay.start()
+        discoveredRelay.start()
+
+        val deadPort = ServerSocket(0).use { it.localPort }
+        val seedUrl = "ws://127.0.0.1:${seedRelay.port}"
+        val discoveredUrl = "ws://127.0.0.1:${discoveredRelay.port}"
+        val deadUrl = "ws://127.0.0.1:$deadPort"
+
+        try {
+            val repo = buildRepository(db)
+            val publisher = NostrCrypto.generateKeyPair()
+
+            // Seed a valid NIP-65 Kind 10002 relay list onto seedRelay pointing to discoveredRelay
+            val nip65Event = NostrEvent.createAndSign(
+                privKeyHex = publisher.privKeyHex,
+                kind = NostrKinds.RELAY_LIST,
+                content = "",
+                tags = listOf(listOf("r", discoveredUrl))
+            )
+            val pubSummary = repo.relayPool.publishEvent(
+                event = nip65Event,
+                targetRelayUrls = listOf(seedUrl),
+                verifyRetrieval = true
+            )
+            assertEquals(1, pubSummary.acceptedCount)
+
+            // Configure DB with live seedRelay + unreachable deadUrl
+            db.shellDao().upsertRelay(RelayEntity(url = seedUrl))
+            db.shellDao().upsertRelay(RelayEntity(url = deadUrl))
+            db.shellDao().upsertRelayHealth(
+                com.example.data.RelayHealthEntity(
+                    url = deadUrl,
+                    failureCount = 2,
+                    consecutiveFailures = 2,
+                    lastFailureAt = System.currentTimeMillis(),
+                    lastErrorReason = "Connection refused"
+                )
+            )
+            repo.relayPool.syncRelays(listOf(seedUrl, deadUrl))
+            repo.relayPool.awaitSocketReady(seedUrl, timeoutMs = 1500L)
+
+            val summary = repo.relayBackgroundManager.runOptimizationCycle(
+                queryTimeoutMs = 2000L,
+                minKeepRelays = 1,
+                maxConfiguredCap = 6
+            )
+
+            assertTrue(
+                "Newly discovered NIP-01 Kind 10002 relay must be adopted: ${summary.discoveredUrls}",
+                discoveredUrl in summary.discoveredUrls
+            )
+            assertTrue(
+                "Unresponsive relay must be dropped: ${summary.droppedUrls}",
+                deadUrl in summary.droppedUrls
+            )
+
+            val configuredUrls = db.shellDao().getRelaysList().map { it.url }
+            assertTrue(seedUrl in configuredUrls)
+            assertTrue(discoveredUrl in configuredUrls)
+            assertFalse(deadUrl in configuredUrls)
+
+            val bgStatus = repo.relayBackgroundStatusFlow.value
+            assertTrue(bgStatus.cycleCount >= 1)
+            assertTrue(bgStatus.discoveredFromNip01Count >= 1)
+            assertTrue(bgStatus.adoptedRelaysCount >= 1)
+            assertTrue(bgStatus.droppedUnresponsiveCount >= 1)
+            assertTrue("Expected positive monitored latency, got ${bgStatus.averageLatencyMs}", bgStatus.averageLatencyMs > 0L)
+
+            repo.shutdown()
+            assertFalse(repo.relayBackgroundStatusFlow.value.isRunning)
+        } finally {
+            runCatching { seedRelay.close() }
+            runCatching { discoveredRelay.close() }
             db.close()
         }
     }
