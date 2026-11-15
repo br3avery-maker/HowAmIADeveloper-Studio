@@ -47,9 +47,12 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -221,22 +224,23 @@ class ShellViewModel @JvmOverloads constructor(
     val publisherProfiles: StateFlow<Map<String, PublisherProfileEntity>> = repository.publisherProfilesFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
 
-    val catalogApplets: StateFlow<List<InstalledAppletEntity>> = combine(
-        repository.rawCatalogAppletsFlow,
-        repository.filteredCatalogFlow,
-        _spamShieldEnabled
-    ) { raw, filtered, shieldOn ->
-        if (shieldOn) filtered.cleanItems else raw
-    }.conflate().flowOn(Dispatchers.Default)
+    val catalogApplets: StateFlow<List<InstalledAppletEntity>> = _spamShieldEnabled
+        .flatMapLatest { shieldOn ->
+            if (shieldOn) repository.filteredCatalogFlow.map { it.cleanItems }
+            else repository.rawCatalogAppletsFlow
+        }
+        .conflate()
+        .flowOn(Dispatchers.Default)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val blockedSpamCount: StateFlow<Int> = combine(
-        repository.filteredCatalogFlow
-    ) { arr ->
-        arr.first().blockedSpamCount
-    }.conflate().flowOn(Dispatchers.Default)
+    val blockedSpamCount: StateFlow<Int> = repository.filteredCatalogFlow
+        .map { it.blockedSpamCount }
+        .distinctUntilChanged()
+        .conflate()
+        .flowOn(Dispatchers.Default)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 
+    @OptIn(kotlinx.coroutines.FlowPreview::class)
     val stackedGalleryGroups: StateFlow<List<StackedAppletGroup>> = combine(
         catalogApplets,
         repository.curatedBookmarksFlow,
@@ -247,7 +251,9 @@ class ShellViewModel @JvmOverloads constructor(
             bookmarks = bookmarks,
             localPubkeyHex = active?.pubkeyHex.orEmpty()
         )
-    }.conflate().flowOn(Dispatchers.Default)
+    }.debounce(80L)
+        .conflate()
+        .flowOn(Dispatchers.Default)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val localCuratedCount: StateFlow<Int> = combine(

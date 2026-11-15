@@ -54,6 +54,8 @@ object CatalogStacker {
         RegexOption.IGNORE_CASE
     )
 
+    private val PARENS_REGEX = Regex("""\([^)]*\)""")
+
     private val NON_ALNUM_REGEX = Regex("""[^a-z0-9]+""")
 
     fun coordinateFor(applet: InstalledAppletEntity): String =
@@ -70,10 +72,10 @@ object CatalogStacker {
     }
 
     fun canonicalTitleStem(rawTitle: String): String? {
-        val single = NsiteSpamFilter.sanitizeSingleLine(rawTitle).lowercase()
+        val single = NsiteSpamFilter.sanitizeSingleLine(rawTitle.take(160)).lowercase()
         if (single.isBlank()) return null
         if (single.startsWith("nsite ") || single.startsWith("napplet ")) return null
-        val noParens = single.replace(Regex("""\([^)]*\)"""), " ").trim()
+        val noParens = single.replace(PARENS_REGEX, " ").trim()
         val stripped = noParens.replace(SUFFIX_STRIP_REGEX, "")
             .replace(NON_ALNUM_REGEX, " ")
             .trim()

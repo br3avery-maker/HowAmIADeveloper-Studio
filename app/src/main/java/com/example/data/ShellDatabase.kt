@@ -108,10 +108,10 @@ interface ShellDao {
     @Query("SELECT * FROM installed_applets WHERE isInstalled = 1 AND isNsite = 1 ORDER BY pinOrder ASC, updatedAt DESC")
     fun observeInstalledApplets(): Flow<List<InstalledAppletEntity>>
 
-    @Query("SELECT * FROM installed_applets WHERE isNsite = 1 ORDER BY isInstalled DESC, updatedAt DESC")
+    @Query("SELECT * FROM installed_applets WHERE isNsite = 1 ORDER BY isInstalled DESC, updatedAt DESC LIMIT 400")
     fun observeAllCatalogApplets(): Flow<List<InstalledAppletEntity>>
 
-    @Query("SELECT * FROM installed_applets WHERE isNsite = 1")
+    @Query("SELECT * FROM installed_applets WHERE isNsite = 1 ORDER BY isInstalled DESC, updatedAt DESC LIMIT 400")
     suspend fun getAllCatalogAppletsList(): List<InstalledAppletEntity>
 
     @Query("SELECT * FROM installed_applets WHERE appletId = :appletId LIMIT 1")
@@ -131,6 +131,12 @@ interface ShellDao {
 
     @Query("DELETE FROM installed_applets WHERE appletId IN (:appletIds)")
     suspend fun deleteAppletsByIds(appletIds: List<String>)
+
+    @Query(
+        "DELETE FROM installed_applets WHERE isInstalled = 0 AND appletId NOT IN " +
+            "(SELECT appletId FROM installed_applets WHERE isNsite = 1 AND isInstalled = 0 ORDER BY updatedAt DESC LIMIT :keepLimit)"
+    )
+    suspend fun pruneExcessUninstalledApplets(keepLimit: Int = 350): Int
 
     @Query("DELETE FROM installed_applets WHERE isNsite = 0")
     suspend fun purgeNonNsiteApplets(): Int

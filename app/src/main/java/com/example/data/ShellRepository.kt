@@ -23,14 +23,20 @@ import com.example.nostr.SignerType
 import com.example.nostr.UnsignedNostrEvent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.shareIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -122,13 +128,18 @@ class ShellRepository(
     private val authorBlossomCache = ConcurrentHashMap<String, List<String>>()
     private val legacyNsitePathCache = ConcurrentHashMap<String, MutableMap<String, String>>()
     private val metadataRequestedTimestamps = ConcurrentHashMap<String, Long>()
-    private val processedEventIds = ConcurrentHashMap.newKeySet<String>()
+    private val processedEventIdsLock = Any()
+    private val processedEventIds = LinkedHashSet<String>(1024)
     private val lastAutoMaintainMs = java.util.concurrent.atomic.AtomicLong(0L)
 
     val accountsFlow: Flow<List<VaultAccountEntity>> = dao.observeAccounts()
     val activeAccountFlow: Flow<VaultAccountEntity?> = dao.observeActiveAccount()
     val installedAppletsFlow: Flow<List<InstalledAppletEntity>> = dao.observeInstalledApplets()
+    @OptIn(FlowPreview::class)
     val rawCatalogAppletsFlow: Flow<List<InstalledAppletEntity>> = dao.observeAllCatalogApplets()
+        .debounce(120L)
+        .distinctUntilChanged()
+        .shareIn(repoScope, SharingStarted.WhileSubscribed(5000), replay = 1)
 
     val publisherProfilesFlow: Flow<Map<String, PublisherProfileEntity>> = combine(
         dao.observePublisherProfiles(),
@@ -159,16 +170,17 @@ class ShellRepository(
         map
     }.conflate().flowOn(Dispatchers.Default)
 
+    @OptIn(FlowPreview::class)
     val filteredCatalogFlow: Flow<NsiteSpamFilter.CatalogFilterResult> = combine(
-        dao.observeAllCatalogApplets(),
+        rawCatalogAppletsFlow,
         dao.observeActiveAccount()
     ) { items, active ->
         NsiteSpamFilter.filterCatalogWithClustering(items, active?.pubkeyHex.orEmpty())
-    }.conflate().flowOn(Dispatchers.Default)
+    }.flowOn(Dispatchers.Default)
+        .shareIn(repoScope, SharingStarted.WhileSubscribed(5000), replay = 1)
 
-    val catalogAppletsFlow: Flow<List<InstalledAppletEntity>> = combine(
-        filteredCatalogFlow
-    ) { arr -> arr.first().cleanItems }.conflate().flowOn(Dispatchers.Default)
+    val catalogAppletsFlow: Flow<List<InstalledAppletEntity>> = filteredCatalogFlow
+        .map { it.cleanItems }
 
     val curatedBookmarksFlow: Flow<List<CuratedBookmarkEntity>> = dao.observeCuratedBookmarks()
 
@@ -348,6 +360,7 @@ class ShellRepository(
                 dao.deleteUninstalledApplets(batch)
             }
         }
+        dao.pruneExcessUninstalledApplets(keepLimit = 350)
         spamIds.size
     }
 
@@ -438,10 +451,24 @@ class ShellRepository(
 
     suspend fun ingestNostrEvent(event: NostrEvent) {
         if (event.id.isNotBlank()) {
-            if (processedEventIds.size > 4096) {
-                processedEventIds.clear()
+            val isDuplicate = synchronized(processedEventIdsLock) {
+                if (event.id in processedEventIds) {
+                    true
+                } else {
+                    if (processedEventIds.size >= 8192) {
+                        val iter = processedEventIds.iterator()
+                        var removed = 0
+                        while (iter.hasNext() && removed < 1024) {
+                            iter.next()
+                            iter.remove()
+                            removed++
+                        }
+                    }
+                    processedEventIds.add(event.id)
+                    false
+                }
             }
-            if (!processedEventIds.add(event.id)) {
+            if (isDuplicate) {
                 return
             }
         }
@@ -770,6 +797,9 @@ class ShellRepository(
         }
         val appletId = "${event.kind}:$pk:$dTag"
         val existing = dao.getAppletById(appletId) ?: dao.getAppletById("${event.kind}:${event.pubkey}:$dTag")
+        if (existing != null && existing.latestEventId == event.id && existing.latestEventId.isNotBlank()) {
+            return
+        }
         val localAccount = dao.getAccountByPubkey(event.pubkey) ?: dao.getAccountByPubkey(pk)
         val isFeaturedCreator = pk.equals(NostrCrypto.DEFAULT_FEATURED_CREATOR_PUBKEY_HEX, ignoreCase = true)
         val parsed = parseManifestEventToEntity(
@@ -799,6 +829,9 @@ class ShellRepository(
             .distinct()
             .joinToString(",")
 
+        val rawEventBounded = event.toJsonString().let { raw ->
+            if (raw.length > 131_072) "" else raw
+        }
         dao.upsertNsiteVersion(
             NsiteVersionEntity(
                 eventId = event.id,
@@ -813,7 +846,7 @@ class ShellRepository(
                 fileCount = fileCount.coerceAtLeast(1),
                 blossomServersCsv = serversCsv,
                 manifestPathsJson = parsed.manifestPathsJson,
-                rawEventJson = event.toJsonString(),
+                rawEventJson = rawEventBounded,
                 signatureVerified = event.verifySignature(),
                 createdAtSec = event.createdAt
             )
@@ -2183,7 +2216,7 @@ class ShellRepository(
                 indexSha256 = resolvedIndexSha,
                 manifestPathsJson = pathMap.toString(),
                 inlineHtml = existing?.inlineHtml?.ifBlank { null }
-                    ?: if (contentLooksLikeHtml) trimmedContent else "",
+                    ?: if (contentLooksLikeHtml && trimmedContent.length <= 131_072) trimmedContent else "",
                 inlineCss = existing?.inlineCss.orEmpty(),
                 inlineJs = existing?.inlineJs.orEmpty(),
                 isInstalled = existing?.isInstalled ?: false,

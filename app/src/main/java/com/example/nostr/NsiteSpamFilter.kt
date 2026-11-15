@@ -91,15 +91,24 @@ object NsiteSpamFilter {
         setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
     )
 
+    private val URL_REGEX = Regex("""https?://\S+""")
+    private val DIGITS_REGEX = Regex("""\d+""")
+    private val NON_LETTER_DIGIT_BRACKET_REGEX = Regex("""[^\p{L}\p{N}<>\s]""")
     private val WHITESPACE_REGEX = Regex("""\s+""")
+
+    private const val MAX_INSPECT_CHARS = 512
+    private const val MAX_CLUSTER_KEY_CHARS = 280
 
     data class CatalogFilterResult(
         val cleanItems: List<InstalledAppletEntity>,
         val blockedSpamCount: Int
     )
 
-    fun sanitizeSingleLine(raw: String): String =
-        raw.replace(WHITESPACE_REGEX, " ").trim()
+    fun sanitizeSingleLine(raw: String): String {
+        if (raw.isEmpty()) return ""
+        val bounded = if (raw.length > MAX_INSPECT_CHARS * 2) raw.substring(0, MAX_INSPECT_CHARS * 2) else raw
+        return bounded.replace(WHITESPACE_REGEX, " ").trim()
+    }
 
     /**
      * Evaluates a single manifest's metadata before inserting into SQLite or rendering.
@@ -111,9 +120,9 @@ object NsiteSpamFilter {
         description: String,
         pathCount: Int
     ): Boolean {
-        val normTitle = sanitizeSingleLine(title).lowercase()
-        val normDesc = sanitizeSingleLine(description).lowercase()
-        val combined = "$normTitle $normDesc ${dTag.lowercase()}"
+        val normTitle = sanitizeSingleLine(title.take(MAX_INSPECT_CHARS)).lowercase()
+        val normDesc = sanitizeSingleLine(description.take(MAX_INSPECT_CHARS)).lowercase()
+        val combined = "$normTitle $normDesc ${dTag.take(128).lowercase()}"
 
         // 1. Direct match against the 5 known spam opening prefixes
         if (KNOWN_SPAM_DESCRIPTION_PREFIXES.any { prefix -> normDesc.startsWith(prefix) || normDesc.contains(prefix) }) {
@@ -176,7 +185,7 @@ object NsiteSpamFilter {
     ): CatalogFilterResult {
         if (items.isEmpty()) return CatalogFilterResult(emptyList(), 0)
 
-        val protectedIds = HashSet<String>()
+        val protectedIds = HashSet<String>(items.size / 4 + 4)
         val individuallyFlaggedIds = HashSet<String>()
 
         val featuredHex = NostrCrypto.DEFAULT_FEATURED_CREATOR_PUBKEY_HEX
@@ -203,30 +212,29 @@ object NsiteSpamFilter {
             if (item.appletId in protectedIds || item.appletId in individuallyFlaggedIds) continue
 
             buildDescriptionClusterKey(item)?.let { key ->
-                descTemplateToPubkeys.getOrPut(key) { HashSet() }.add(item.authorPubkey.lowercase())
-                descTemplateToIds.getOrPut(key) { ArrayList() }.add(item.appletId)
+                descTemplateToPubkeys.getOrPut(key) { HashSet(4) }.add(item.authorPubkey.lowercase())
+                descTemplateToIds.getOrPut(key) { ArrayList(2) }.add(item.appletId)
             }
 
             buildPipeTitleClusterKey(item.title)?.let { key ->
-                pipeTitleTemplateToPubkeys.getOrPut(key) { HashSet() }.add(item.authorPubkey.lowercase())
-                pipeTitleTemplateToIds.getOrPut(key) { ArrayList() }.add(item.appletId)
+                pipeTitleTemplateToPubkeys.getOrPut(key) { HashSet(4) }.add(item.authorPubkey.lowercase())
+                pipeTitleTemplateToIds.getOrPut(key) { ArrayList(2) }.add(item.appletId)
             }
         }
 
-        val clusterFlaggedIds = HashSet<String>()
+        val allBlocked = HashSet<String>(individuallyFlaggedIds)
         descTemplateToPubkeys.forEach { (key, pubkeys) ->
             // If >= 2 distinct pubkeys publish the exact same multi-word description template
             if (pubkeys.size >= 2) {
-                descTemplateToIds[key]?.let { clusterFlaggedIds.addAll(it) }
+                descTemplateToIds[key]?.let { allBlocked.addAll(it) }
             }
         }
         pipeTitleTemplateToPubkeys.forEach { (key, pubkeys) ->
             if (pubkeys.size >= 2) {
-                pipeTitleTemplateToIds[key]?.let { clusterFlaggedIds.addAll(it) }
+                pipeTitleTemplateToIds[key]?.let { allBlocked.addAll(it) }
             }
         }
 
-        val allBlocked = individuallyFlaggedIds + clusterFlaggedIds
         if (allBlocked.isEmpty()) {
             return CatalogFilterResult(items, 0)
         }
@@ -241,7 +249,7 @@ object NsiteSpamFilter {
     fun findSpamAppletIds(items: List<InstalledAppletEntity>, localPubkeyHex: String): List<String> {
         val result = filterCatalogWithClustering(items, localPubkeyHex)
         if (result.blockedSpamCount == 0) return emptyList()
-        val cleanIds = result.cleanItems.mapTo(HashSet()) { it.appletId }
+        val cleanIds = result.cleanItems.mapTo(HashSet(result.cleanItems.size)) { it.appletId }
         return items.asSequence()
             .map { it.appletId }
             .filter { it !in cleanIds }
@@ -249,7 +257,13 @@ object NsiteSpamFilter {
     }
 
     private fun buildDescriptionClusterKey(item: InstalledAppletEntity): String? {
-        val clean = sanitizeSingleLine(item.description).lowercase()
+        if (item.description.isBlank()) return null
+        val bounded = if (item.description.length > MAX_CLUSTER_KEY_CHARS) {
+            item.description.substring(0, MAX_CLUSTER_KEY_CHARS)
+        } else {
+            item.description
+        }
+        val clean = sanitizeSingleLine(bounded).lowercase()
         if (clean.isBlank() ||
             clean == "decentralized nostr web manifest" ||
             clean == "nostr web applet"
@@ -258,10 +272,10 @@ object NsiteSpamFilter {
         }
         // Replace domains/URLs with <dom> and digits with <n> to expose shared bot templates
         val masked = clean
-            .replace(Regex("""https?://\S+"""), "<url>")
+            .replace(URL_REGEX, "<url>")
             .replace(EXTERNAL_DOMAIN_REGEX, "<dom>")
-            .replace(Regex("""\d+"""), "<n>")
-            .replace(Regex("""[^\p{L}\p{N}<>\s]"""), " ")
+            .replace(DIGITS_REGEX, "<n>")
+            .replace(NON_LETTER_DIGIT_BRACKET_REGEX, " ")
             .replace(WHITESPACE_REGEX, " ")
             .trim()
 
@@ -272,13 +286,14 @@ object NsiteSpamFilter {
     }
 
     private fun buildPipeTitleClusterKey(title: String): String? {
-        val clean = sanitizeSingleLine(title)
+        if (title.isBlank() || !title.contains('|')) return null
+        val clean = sanitizeSingleLine(title.take(MAX_CLUSTER_KEY_CHARS))
         val pipeIdx = clean.indexOf('|')
         if (pipeIdx <= 0 || pipeIdx >= clean.length - 2) return null
         val rhs = clean.substring(pipeIdx + 1)
             .lowercase()
             .replace(EXTERNAL_DOMAIN_REGEX, "<dom>")
-            .replace(Regex("""[^\p{L}\p{N}<>\s]"""), " ")
+            .replace(NON_LETTER_DIGIT_BRACKET_REGEX, " ")
             .replace(WHITESPACE_REGEX, " ")
             .trim()
         val words = rhs.split(' ').filter { it.isNotBlank() }
@@ -287,7 +302,8 @@ object NsiteSpamFilter {
     }
 
     private fun countPaths(manifestPathsJson: String): Int {
-        if (manifestPathsJson.isBlank()) return 0
+        if (manifestPathsJson.isBlank() || manifestPathsJson == "{}") return 0
+        if (manifestPathsJson.length > 32_768) return 2 // Multi-file manifest, cannot be single-page spam
         return runCatching { JSONObject(manifestPathsJson).length() }.getOrDefault(0)
     }
 }

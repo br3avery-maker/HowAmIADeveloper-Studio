@@ -286,7 +286,13 @@ object NostrCrypto {
 
     private fun computeSharedSecret(privKeyHex: String, peerPubKeyHex: String): ByteArray {
         val d = BigInteger(1, privKeyHex.hexToBytes())
-        val peerX = BigInteger(1, peerPubKeyHex.trim().removePrefix("02").removePrefix("03").hexToBytes())
+        val cleanedPeer = peerPubKeyHex.trim().lowercase()
+        val xHex = if (cleanedPeer.length == 66 && (cleanedPeer.startsWith("02") || cleanedPeer.startsWith("03"))) {
+            cleanedPeer.substring(2)
+        } else {
+            cleanedPeer
+        }
+        val peerX = BigInteger(1, xHex.hexToBytes())
         val peerPoint = liftX(peerX) ?: error("Invalid peer public key")
         val shared = scalarMult(d, peerPoint) ?: error("Invalid ECDH shared point")
         return shared.x.toBytes32()

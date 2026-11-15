@@ -175,6 +175,54 @@ class ExampleUnitTest {
         org.junit.Assert.assertNull(NostrCrypto.resolvePubkeyHex("2048 link puzzle"))
         org.junit.Assert.assertNull(NostrCrypto.resolvePubkeyHex(""))
     }
+
+    @Test
+    fun nsiteSpamFilter_handlesLargeAdversarialCatalogWithoutOom() {
+        fun alphaWord(n: Int): String {
+            var v = n + 1
+            return buildString {
+                while (v > 0) {
+                    append(('a'.code + (v % 26)).toChar())
+                    v /= 26
+                }
+            }.padEnd(4, 'z')
+        }
+
+        val longNoise = "https://example.org/path/12345 " + "alpha-1234 beta! ".repeat(2000)
+        val entities = (1..800).map { i ->
+            val pk = "%064x".format(i)
+            val isClusterBot = i <= 400
+            com.example.data.InstalledAppletEntity(
+                appletId = "35128:$pk:site-$i",
+                kind = NostrKinds.NSITE_NAMED,
+                authorPubkey = pk,
+                authorNpub = "npub1test$i",
+                dTag = "site-$i",
+                title = if (isClusterBot) "User $i | Best daily notes feed" else "Zine ${alphaWord(i)} $i",
+                description = if (isClusterBot) {
+                    "Shared automated template digest item $i visiting https://bot$i.example.com " + longNoise
+                } else {
+                    "${alphaWord(i)} ${alphaWord(i * 17)} ${alphaWord(i * 53)} ${alphaWord(i * 97)} ${alphaWord(i * 131)} $longNoise"
+                },
+                iconGlyph = "🌐",
+                accentHex = "#FF1493",
+                isNsite = true,
+                enableNip07 = true,
+                isInstalled = false
+            )
+        }
+        repeat(5) {
+            val result = NsiteSpamFilter.filterCatalogWithClustering(entities, "")
+            assertEquals(400, result.blockedSpamCount)
+            assertEquals(400, result.cleanItems.size)
+            val stacked = com.example.data.CatalogStacker.buildStackedGroups(
+                items = result.cleanItems,
+                bookmarks = emptyList(),
+                localPubkeyHex = ""
+            )
+            assertEquals(400, stacked.size)
+        }
+    }
 }
 
 
