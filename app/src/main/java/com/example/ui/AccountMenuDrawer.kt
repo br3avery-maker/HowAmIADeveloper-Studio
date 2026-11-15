@@ -83,6 +83,7 @@ fun AccountMenuDrawerContent(
     accounts: List<VaultAccountEntity>,
     installedNsites: List<InstalledAppletEntity> = emptyList(),
     currentlyRunningAppletId: String? = null,
+    currentDestination: ShellDestination? = null,
     connectedRelays: Int,
     totalRelays: Int,
     onSelectDestination: (ShellDestination) -> Unit,
@@ -321,6 +322,7 @@ fun AccountMenuDrawerContent(
                 icon = Icons.Default.Code,
                 label = stringResource(R.string.drawer_studio),
                 badge = "Fork/Build",
+                selected = currentDestination is ShellDestination.CreatorStudio,
                 testTag = "drawer_studio_item",
                 onClick = { onSelectDestination(ShellDestination.CreatorStudio()) }
             )
@@ -328,6 +330,7 @@ fun AccountMenuDrawerContent(
                 icon = Icons.Default.Hub,
                 label = stringResource(R.string.drawer_relays),
                 badge = "$connectedRelays/$totalRelays",
+                selected = currentDestination is ShellDestination.RelayManager,
                 testTag = "drawer_relays_item",
                 onClick = { onSelectDestination(ShellDestination.RelayManager) }
             )
@@ -335,6 +338,7 @@ fun AccountMenuDrawerContent(
                 icon = Icons.Default.Key,
                 label = stringResource(R.string.drawer_vault),
                 badge = "${accounts.size} IDs",
+                selected = currentDestination is ShellDestination.VaultAndAudit,
                 testTag = "drawer_vault_item",
                 onClick = { onSelectDestination(ShellDestination.VaultAndAudit) }
             )
@@ -342,6 +346,7 @@ fun AccountMenuDrawerContent(
                 icon = Icons.Default.EditNote,
                 label = stringResource(R.string.drawer_notes),
                 badge = "Broadcast",
+                selected = currentDestination is ShellDestination.NotesComposer,
                 testTag = "drawer_notes_item",
                 onClick = { onSelectDestination(ShellDestination.NotesComposer) }
             )
@@ -349,6 +354,7 @@ fun AccountMenuDrawerContent(
                 icon = Icons.Default.AccountCircle,
                 label = stringResource(R.string.drawer_edit_profile),
                 badge = null,
+                selected = currentDestination is ShellDestination.UserProfile,
                 testTag = "drawer_profile_item",
                 onClick = { onSelectDestination(ShellDestination.UserProfile) }
             )
@@ -356,6 +362,7 @@ fun AccountMenuDrawerContent(
                 icon = Icons.Default.Palette,
                 label = stringResource(R.string.drawer_wallpaper),
                 badge = null,
+                selected = currentDestination is ShellDestination.WallpaperSettings,
                 testTag = "drawer_wallpaper_item",
                 onClick = { onSelectDestination(ShellDestination.WallpaperSettings) }
             )
@@ -368,6 +375,7 @@ private fun DrawerActionRow(
     icon: ImageVector,
     label: String,
     badge: String?,
+    selected: Boolean,
     testTag: String,
     onClick: () -> Unit
 ) {
@@ -376,14 +384,16 @@ private fun DrawerActionRow(
             Icon(
                 imageVector = icon,
                 contentDescription = null,
-                tint = BreDeepPink,
+                tint = if (selected) ZineBoneCream else BreDeepPink,
                 modifier = Modifier.size(18.dp)
             )
         },
         label = {
             Text(
                 text = label,
-                style = MaterialTheme.typography.labelLarge,
+                style = MaterialTheme.typography.labelLarge.copy(
+                    fontWeight = if (selected) FontWeight.Black else FontWeight.Medium
+                ),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
@@ -393,19 +403,28 @@ private fun DrawerActionRow(
                 Text(
                     text = it,
                     style = MaterialTheme.typography.labelSmall,
-                    color = ZineBoneCream
+                    color = if (selected) BreWhite else ZineBoneCream
                 )
             }
         },
-        selected = false,
+        selected = selected,
         onClick = onClick,
         colors = NavigationDrawerItemDefaults.colors(
+            selectedContainerColor = BrePinkDark2.copy(alpha = 0.45f),
+            selectedTextColor = ZineBoneCream,
             unselectedContainerColor = ObsidianSurface,
             unselectedTextColor = MaterialTheme.colorScheme.onSurface
         ),
         modifier = Modifier
             .height(42.dp)
             .padding(vertical = 1.dp)
+            .then(
+                if (selected) {
+                    Modifier.border(1.dp, BreDeepPink, RoundedCornerShape(999.dp))
+                } else {
+                    Modifier
+                }
+            )
             .testTag(testTag)
     )
 }

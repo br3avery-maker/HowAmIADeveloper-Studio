@@ -23,7 +23,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -104,6 +106,7 @@ class ShellRepository(
     private val authorBlossomCache = ConcurrentHashMap<String, List<String>>()
     private val legacyNsitePathCache = ConcurrentHashMap<String, MutableMap<String, String>>()
     private val metadataRequestedTimestamps = ConcurrentHashMap<String, Long>()
+    private val processedEventIds = ConcurrentHashMap.newKeySet<String>()
 
     val accountsFlow: Flow<List<VaultAccountEntity>> = dao.observeAccounts()
     val activeAccountFlow: Flow<VaultAccountEntity?> = dao.observeActiveAccount()
@@ -137,18 +140,18 @@ class ShellRepository(
             )
         }
         map
-    }
+    }.conflate().flowOn(Dispatchers.Default)
 
     val filteredCatalogFlow: Flow<NsiteSpamFilter.CatalogFilterResult> = combine(
         dao.observeAllCatalogApplets(),
         dao.observeActiveAccount()
     ) { items, active ->
         NsiteSpamFilter.filterCatalogWithClustering(items, active?.pubkeyHex.orEmpty())
-    }
+    }.conflate().flowOn(Dispatchers.Default)
 
     val catalogAppletsFlow: Flow<List<InstalledAppletEntity>> = combine(
         filteredCatalogFlow
-    ) { arr -> arr.first().cleanItems }
+    ) { arr -> arr.first().cleanItems }.conflate().flowOn(Dispatchers.Default)
 
     val curatedBookmarksFlow: Flow<List<CuratedBookmarkEntity>> = dao.observeCuratedBookmarks()
 
@@ -162,7 +165,7 @@ class ShellRepository(
             bookmarks = bookmarks,
             localPubkeyHex = active?.pubkeyHex.orEmpty()
         )
-    }
+    }.conflate().flowOn(Dispatchers.Default)
 
     val notesFlow: Flow<List<NoteEntity>> = dao.observeNotes()
     val auditLogFlow: Flow<List<SignerAuditEntity>> = dao.observeAuditLog()
@@ -184,7 +187,7 @@ class ShellRepository(
                 health = healthMap[entity.url]
             )
         }
-    }
+    }.conflate().flowOn(Dispatchers.Default)
 
     val managedBlossomServersFlow: Flow<List<ManagedBlossomItem>> = combine(
         dao.observeBlossomServers(),
@@ -202,7 +205,7 @@ class ShellRepository(
                 health = healthMap[srv.serverUrl]
             )
         }
-    }
+    }.conflate().flowOn(Dispatchers.Default)
 
     init {
         repoScope.launch {
@@ -366,6 +369,18 @@ class ShellRepository(
     }
 
     suspend fun ingestNostrEvent(event: NostrEvent) {
+        if (event.id.isNotBlank()) {
+            if (processedEventIds.size > 4096) {
+                processedEventIds.clear()
+            }
+            if (!processedEventIds.add(event.id)) {
+                return
+            }
+        }
+        // NIP-01 trust gate: verify canonical SHA-256 ID and BIP-340 Schnorr signature before accepting into state
+        if (!event.verifySignature()) {
+            return
+        }
         when (event.kind) {
             NostrKinds.METADATA -> handleIncomingMetadata(event)
             NostrKinds.RELAY_LIST -> handleIncomingRelayList(event)
@@ -392,11 +407,14 @@ class ShellRepository(
 
         val writeRelays = event.tags
             .filter { row ->
-                row.size >= 2 &&
-                    row[0] == "r" &&
-                    (row[1].trim().startsWith("wss://", ignoreCase = true) ||
-                        row[1].trim().startsWith("ws://", ignoreCase = true)) &&
-                    (row.size < 3 || row[2].isBlank() || row[2].equals("write", ignoreCase = true))
+                if (row.size < 2 || row[0] != "r") return@filter false
+                val rawUrl = row[1].trim()
+                val validScheme = rawUrl.startsWith("wss://", ignoreCase = true) ||
+                    rawUrl.startsWith("ws://", ignoreCase = true)
+                val noCredsOrFragment = !rawUrl.contains('#') && !rawUrl.substringAfter("://").substringBefore('/').contains('@')
+                val marker = if (row.size >= 3) row[2].trim().lowercase() else ""
+                val validWriteRole = marker.isEmpty() || marker == "write"
+                validScheme && noCredsOrFragment && validWriteRole
             }
             .map { RelayPoolClient.normalizeRelayUrl(it[1]) }
             .filter { it.isNotBlank() }
@@ -693,9 +711,18 @@ class ShellRepository(
             )
         )
 
-        // Only replace primary catalog row if this manifest is at least as recent as what's stored
-        if (existing != null && (event.createdAt * 1000L) < existing.updatedAt) {
-            return
+        // NIP-01 replaceable/addressable semantics: newer timestamp wins; on equal timestamp, lowest lexicographic event ID wins
+        if (existing != null) {
+            val eventMs = event.createdAt * 1000L
+            if (eventMs < existing.updatedAt) {
+                return
+            }
+            if (eventMs == existing.updatedAt &&
+                existing.latestEventId.isNotBlank() &&
+                event.id.lowercase() >= existing.latestEventId.lowercase()
+            ) {
+                return
+            }
         }
 
         val finalEntity = if (isFeaturedCreator && existing == null && prefsRepo.markAppletAutoPinnedOnce(parsed.appletId)) {

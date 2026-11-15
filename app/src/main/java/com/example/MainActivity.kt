@@ -154,6 +154,7 @@ fun SovereignShellRoot(
                     accounts = accounts,
                     installedNsites = installedApplets,
                     currentlyRunningAppletId = currentlyRunningId,
+                    currentDestination = destination,
                     connectedRelays = connectedRelayCount,
                     totalRelays = managedRelays.size,
                     onSelectDestination = { targetDest ->

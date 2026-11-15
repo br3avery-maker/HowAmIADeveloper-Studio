@@ -178,6 +178,21 @@ data class NostrEvent(
             )
         }.getOrNull()
 
+        /**
+         * Computes the canonical NIP-5A aggregate content hash (`x` tag):
+         * For every path tag produce `hash + ' ' + path + '\n'`, sort complete lines
+         * lexicographically, concatenate as UTF-8, and SHA-256 the bytes.
+         */
+        fun computeNip5aAggregateHash(pathToSha: Map<String, String>): String {
+            if (pathToSha.isEmpty()) return ""
+            val lines = pathToSha.entries.map { (path, sha) ->
+                val normPath = "/" + path.trim().trimStart('/')
+                "${sha.trim().lowercase()} $normPath\n"
+            }.sorted()
+            val joined = lines.joinToString("")
+            return NostrCrypto.sha256Hex(joined.toByteArray(Charsets.UTF_8))
+        }
+
         private fun escapeJsonString(s: String): String = buildString {
             append('"')
             for (ch in s) {

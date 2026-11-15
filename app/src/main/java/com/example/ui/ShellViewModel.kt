@@ -36,6 +36,7 @@ import com.example.nostr.RelayConnectionStatus
 import com.example.nostr.SignDecision
 import com.example.nostr.UnsignedNostrEvent
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -43,8 +44,10 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -183,13 +186,16 @@ class ShellViewModel @JvmOverloads constructor(
         _activeProjectId
     ) { projects, selectedId ->
         projects.firstOrNull { it.projectId == selectedId } ?: projects.firstOrNull()
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+    }.conflate().flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
     val activeProjectFiles: StateFlow<List<NsiteProjectFileEntity>> = activeProject
         .flatMapLatest { proj ->
             if (proj == null) flowOf(emptyList())
             else repository.projectRepository.observeProjectFiles(proj.projectId)
         }
+        .conflate()
+        .flowOn(Dispatchers.IO)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     private val _selectedFilePath = MutableStateFlow("/index.html")
@@ -219,13 +225,15 @@ class ShellViewModel @JvmOverloads constructor(
         _spamShieldEnabled
     ) { raw, filtered, shieldOn ->
         if (shieldOn) filtered.cleanItems else raw
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }.conflate().flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val blockedSpamCount: StateFlow<Int> = combine(
         repository.filteredCatalogFlow
     ) { arr ->
         arr.first().blockedSpamCount
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+    }.conflate().flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 
     val stackedGalleryGroups: StateFlow<List<StackedAppletGroup>> = combine(
         catalogApplets,
@@ -237,7 +245,8 @@ class ShellViewModel @JvmOverloads constructor(
             bookmarks = bookmarks,
             localPubkeyHex = active?.pubkeyHex.orEmpty()
         )
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    }.conflate().flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val localCuratedCount: StateFlow<Int> = combine(
         repository.curatedBookmarksFlow,
@@ -247,7 +256,8 @@ class ShellViewModel @JvmOverloads constructor(
         bookmarks.count {
             it.isLocalCurator || (pk.isNotBlank() && it.curatorPubkey.equals(pk, ignoreCase = true))
         }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+    }.conflate().flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 
     val managedRelays: StateFlow<List<ManagedRelayItem>> = repository.managedRelaysFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -266,10 +276,11 @@ class ShellViewModel @JvmOverloads constructor(
 
     val connectedRelayCount: StateFlow<Int> = combine(managedRelays) { arr ->
         arr.first().count { it.statusInfo.status == RelayConnectionStatus.CONNECTED }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+    }.conflate().flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 
     init {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             val active = repository.dao.getActiveAccount()
             val initialProj = repository.projectRepository.ensureInitialProjectExists(
                 ownerPubkeyHex = active?.pubkeyHex.orEmpty()

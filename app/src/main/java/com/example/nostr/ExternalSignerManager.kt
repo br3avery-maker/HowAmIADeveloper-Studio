@@ -90,8 +90,10 @@ class ExternalSignerManager(
         withContext(Dispatchers.Main) {
             val launcher = launchNip55IntentCallback
                 ?: error("Android Activity intent bridge not attached")
+            val reqId = "login_${UUID.randomUUID().toString().take(8)}"
             val intent = Intent(Intent.ACTION_VIEW, Uri.parse("nostrsigner:")).apply {
                 putExtra("type", "get_public_key")
+                putExtra("id", reqId)
                 if (preferredPackage.isNotBlank()) {
                     `package` = preferredPackage
                 }
@@ -108,7 +110,16 @@ class ExternalSignerManager(
             val res = withTimeoutOrNull(60_000L) { def.await() }
                 ?: error("Timed out waiting for NIP-55 Android signer")
             if (res.resultCode != Activity.RESULT_OK || res.data == null) {
-                error("NIP-55 login cancelled or rejected")
+                error("NIP-55 signer failed or was cancelled (resultCode=${res.resultCode})")
+            }
+            if (res.data.getBooleanExtra("rejected", false) ||
+                res.data.getStringExtra("rejected")?.equals("true", ignoreCase = true) == true
+            ) {
+                error("NIP-55 user explicitly rejected public key request")
+            }
+            val echoedId = res.data.getStringExtra("id").orEmpty()
+            if (echoedId.isNotBlank() && echoedId != reqId) {
+                error("NIP-55 correlation ID mismatch (expected $reqId, got $echoedId)")
             }
 
             val rawPub = res.data.getStringExtra("result")
@@ -306,13 +317,23 @@ class ExternalSignerManager(
         val res = withTimeoutOrNull(60_000L) { def.await() }
             ?: error("Timed out waiting for NIP-55 signature")
         if (res.resultCode != Activity.RESULT_OK || res.data == null) {
-            error("NIP-55 signing request rejected")
+            error("NIP-55 signing failed or was cancelled (resultCode=${res.resultCode})")
+        }
+        if (res.data.getBooleanExtra("rejected", false) ||
+            res.data.getStringExtra("rejected")?.equals("true", ignoreCase = true) == true
+        ) {
+            error("NIP-55 signing request explicitly rejected by user")
+        }
+        val echoedId = res.data.getStringExtra("id").orEmpty()
+        if (echoedId.isNotBlank() && echoedId != eventId) {
+            error("NIP-55 correlation ID mismatch (expected $eventId, got $echoedId)")
         }
 
         val fullSignedJson = res.data.getStringExtra("event").orEmpty()
         if (fullSignedJson.startsWith("{")) {
             val parsed = NostrEvent.fromJson(JSONObject(fullSignedJson))
                 ?: error("Malformed signed event returned by NIP-55 signer")
+            validateSignedEventMatchesTemplate(parsed, pubHex, unsigned)
             require(parsed.verifySignature()) { "NIP-55 returned invalid Schnorr signature" }
             return@withContext parsed
         }
@@ -340,9 +361,11 @@ class ExternalSignerManager(
     ): String = withContext(Dispatchers.Main) {
         val launcher = launchNip55IntentCallback
             ?: error("Android Activity intent bridge not attached")
+        val reqId = "crypto_${UUID.randomUUID().toString().take(8)}"
         val uri = Uri.parse("nostrsigner:${Uri.encode(payload)}")
         val intent = Intent(Intent.ACTION_VIEW, uri).apply {
             putExtra("type", type)
+            putExtra("id", reqId)
             putExtra("pubKey", peerPubkeyHex)
             putExtra("current_user", account.npub.ifBlank { account.pubkeyHex })
             if (account.signerPackage.isNotBlank()) {
@@ -358,7 +381,16 @@ class ExternalSignerManager(
         val res = withTimeoutOrNull(60_000L) { def.await() }
             ?: error("Timed out waiting for NIP-55 $type")
         if (res.resultCode != Activity.RESULT_OK || res.data == null) {
-            error("NIP-55 $type rejected")
+            error("NIP-55 $type failed or was cancelled")
+        }
+        if (res.data.getBooleanExtra("rejected", false) ||
+            res.data.getStringExtra("rejected")?.equals("true", ignoreCase = true) == true
+        ) {
+            error("NIP-55 $type explicitly rejected by user")
+        }
+        val echoedId = res.data.getStringExtra("id").orEmpty()
+        if (echoedId.isNotBlank() && echoedId != reqId) {
+            error("NIP-55 $type correlation ID mismatch")
         }
         res.data.getStringExtra("result")
             ?: res.data.getStringExtra("signature")
@@ -393,8 +425,28 @@ class ExternalSignerManager(
         val resultStr = resp.optString("result")
         val signed = NostrEvent.fromJson(JSONObject(resultStr))
             ?: error("Malformed signed event from NIP-46 bunker")
+        validateSignedEventMatchesTemplate(signed, account.pubkeyHex.lowercase(), unsigned)
         require(signed.verifySignature()) { "NIP-46 bunker signature failed BIP-340 verification" }
         signed
+    }
+
+    private fun validateSignedEventMatchesTemplate(
+        signed: NostrEvent,
+        expectedPubkeyHex: String,
+        template: UnsignedNostrEvent
+    ) {
+        require(signed.pubkey.equals(expectedPubkeyHex, ignoreCase = true)) {
+            "Signer returned mismatched author pubkey (expected $expectedPubkeyHex, got ${signed.pubkey})"
+        }
+        require(signed.kind == template.kind) {
+            "Signer altered event kind (expected ${template.kind}, got ${signed.kind})"
+        }
+        require(signed.content == template.content) {
+            "Signer altered event content"
+        }
+        require(signed.tags == template.tags) {
+            "Signer altered event tags"
+        }
     }
 
     private suspend fun callNip46Crypto(

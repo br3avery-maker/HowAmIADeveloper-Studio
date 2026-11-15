@@ -777,29 +777,40 @@ nostrBtn?.addEventListener('click', async () => {
 
         // Ensure canonical /index.html route is mapped if entry file had a custom name
         val entryUpload = uploadResultsByPath[entryFile.relativePath]!!
+        val canonicalPathMap = LinkedHashMap<String, String>().apply {
+            if (entryFile.relativePath != "/index.html") {
+                put("/index.html", entryUpload.sha256)
+            }
+            uploadResultsByPath.forEach { (relPath, res) ->
+                put(relPath, res.sha256)
+            }
+            if (!uploadResultsByPath.containsKey("/404.html")) {
+                put("/404.html", entryUpload.sha256)
+            }
+        }
+        val aggregateHash = NostrEvent.computeNip5aAggregateHash(canonicalPathMap)
+
         val tags = buildList {
             if (targetKind == NostrKinds.NSITE_NAMED) {
                 add(listOf("d", cleanSlug))
             }
             add(listOf("title", project.title.trim()))
             add(listOf("description", project.description.trim()))
-            if (entryFile.relativePath != "/index.html") {
-                add(listOf("path", "/index.html", entryUpload.sha256))
+            canonicalPathMap.forEach { (relPath, sha) ->
+                add(listOf("path", relPath, sha))
             }
-            uploadResultsByPath.forEach { (relPath, res) ->
-                add(listOf("path", relPath, res.sha256))
-            }
-            if (!uploadResultsByPath.containsKey("/404.html")) {
-                add(listOf("path", "/404.html", entryUpload.sha256))
+            if (aggregateHash.length == 64) {
+                add(listOf("x", aggregateHash))
             }
             verifiedServersSet.forEach { srv ->
                 add(listOf("server", srv))
             }
-            // Preserve fork provenance without ever impersonating the original publisher
+            // Preserve NIP-5A fork provenance ('a' immediate parent + 'A' origin lineage) without ever impersonating original author
             if (project.isFork && !project.forkSourcePubkey.equals(activeAccount.pubkeyHex, ignoreCase = true)) {
                 if (project.forkSourceCoordinate.isNotBlank()) {
                     add(listOf("fork", project.forkSourceCoordinate))
                     add(listOf("a", project.forkSourceCoordinate))
+                    add(listOf("A", project.forkSourceCoordinate))
                 }
                 if (project.forkSourceEventId.isNotBlank()) {
                     add(listOf("e", project.forkSourceEventId, "", "fork"))

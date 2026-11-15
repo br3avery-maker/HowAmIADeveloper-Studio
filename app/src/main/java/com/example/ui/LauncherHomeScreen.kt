@@ -533,8 +533,8 @@ fun LauncherWallpaperLayer(
     Box(modifier = Modifier.fillMaxSize().background(BreBlack)) {
         when (prefs.wallpaperStyle) {
             WallpaperStyle.CYBER_ZINE -> {
-                Image(
-                    painter = painterResource(id = R.drawable.img_zine_wallpaper),
+                AsyncImage(
+                    model = R.drawable.img_zine_wallpaper,
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize()
@@ -551,8 +551,8 @@ fun LauncherWallpaperLayer(
                         modifier = Modifier.fillMaxSize()
                     )
                 } else {
-                    Image(
-                        painter = painterResource(id = R.drawable.img_zine_wallpaper),
+                    AsyncImage(
+                        model = R.drawable.img_zine_wallpaper,
                         contentDescription = null,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize()
@@ -561,8 +561,8 @@ fun LauncherWallpaperLayer(
             }
 
             WallpaperStyle.DEFAULT_AURORA -> {
-                Image(
-                    painter = painterResource(id = R.drawable.img_default_wallpaper),
+                AsyncImage(
+                    model = R.drawable.img_default_wallpaper,
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize()
@@ -693,27 +693,7 @@ private fun LauncherTopBar(
             )
         }
 
-        // Search Feed Button
-        Surface(
-            onClick = onOpenSearchFeed,
-            shape = CircleShape,
-            color = BreGray900.copy(alpha = 0.92f),
-            border = BorderStroke(1.dp, BrePinkDark2),
-            modifier = Modifier
-                .size(48.dp)
-                .minimumInteractiveComponentSize()
-                .testTag("launcher_search_bar")
-        ) {
-            Box(contentAlignment = Alignment.Center) {
-                Icon(
-                    imageVector = Icons.Default.Search,
-                    contentDescription = "Search Chaos Feed",
-                    tint = BreDeepPink
-                )
-            }
-        }
-
-        // Toggle for Icon Grid / List
+        // Toggle for Icon Grid / List (single responsibility in top bar; Explore is in Bottom Navigation)
         Surface(
             onClick = onToggleViewMode,
             shape = CircleShape,

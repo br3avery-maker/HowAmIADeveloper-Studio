@@ -198,20 +198,29 @@ class BlossomClient(
         }
 
         val nowSec = System.currentTimeMillis() / 1000L
+        val pastCreatedAtSec = (nowSec - 5L).coerceAtLeast(1L)
         val expirationSec = (nowSec + 600L).toString()
+        val serverDomain = runCatching {
+            java.net.URI(cleanServer).host?.lowercase().orEmpty()
+        }.getOrDefault("")
+
+        val authTags = buildList {
+            add(listOf("t", "upload"))
+            add(listOf("x", sha256))
+            if (serverDomain.isNotBlank()) {
+                add(listOf("server", serverDomain))
+            }
+            add(listOf("expiration", expirationSec))
+        }
 
         val authEvent = runCatching {
             signAuthEvent(
                 UnsignedNostrEvent(
                     pubkey = pubkeyHex,
-                    createdAt = nowSec,
+                    createdAt = pastCreatedAtSec,
                     kind = NostrKinds.BLOSSOM_AUTH,
                     content = "Upload blob $sha256",
-                    tags = listOf(
-                        listOf("t", "upload"),
-                        listOf("x", sha256),
-                        listOf("expiration", expirationSec)
-                    )
+                    tags = authTags
                 )
             )
         }.getOrElse { err ->
@@ -225,16 +234,20 @@ class BlossomClient(
             )
         }
 
-        val base64Auth = Base64.encodeToString(
-            authEvent.toJsonString().toByteArray(Charsets.UTF_8),
-            Base64.NO_WRAP
-        )
+        val authBytes = authEvent.toJsonString().toByteArray(Charsets.UTF_8)
+        val base64UrlAuth = runCatching {
+            Base64.encodeToString(
+                authBytes,
+                Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING
+            )
+        }.getOrNull()?.takeIf { it.isNotEmpty() }
+            ?: java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(authBytes)
 
         val startMs = System.currentTimeMillis()
         val putUrl = "$cleanServer/upload"
         val request = Request.Builder()
             .url(putUrl)
-            .header("Authorization", "Nostr $base64Auth")
+            .header("Authorization", "Nostr $base64UrlAuth")
             .header("X-SHA-256", sha256)
             .header("Content-Type", mimeType)
             .put(bytes.toRequestBody(mimeType.toMediaType()))
@@ -259,6 +272,22 @@ class BlossomClient(
                             serverUrl = cleanServer,
                             uploadedLive = false,
                             statusDetail = "Hash mismatch from $cleanServer",
+                            stage = DeliveryVerificationStage.FAILED,
+                            httpCode = resp.code
+                        )
+                    }
+                    val returnedSize = respObj?.optLong("size", -1L) ?: -1L
+                    if (returnedSize > 0L && returnedSize != bytes.size.toLong()) {
+                        healthObserver?.invoke(
+                            cleanServer, true, false, false, true, rtt,
+                            "Server returned mismatched byte size ($returnedSize != ${bytes.size})"
+                        )
+                        return@use BlobUploadResult(
+                            sha256 = sha256,
+                            url = "$cleanServer/$sha256$extSuffix",
+                            serverUrl = cleanServer,
+                            uploadedLive = false,
+                            statusDetail = "Descriptor size mismatch from $cleanServer ($returnedSize != ${bytes.size})",
                             stage = DeliveryVerificationStage.FAILED,
                             httpCode = resp.code
                         )
