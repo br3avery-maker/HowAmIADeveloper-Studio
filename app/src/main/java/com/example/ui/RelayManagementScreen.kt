@@ -41,6 +41,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.ManagedBlossomItem
 import com.example.data.ManagedRelayItem
+import com.example.nostr.AdaptiveNetworkEngine
 import com.example.nostr.RelayConnectionStatus
 import com.example.ui.theme.*
 import kotlin.math.roundToInt
@@ -58,6 +59,7 @@ fun RelayManagementScreen(
     onSetPrimaryBlossom: (String) -> Unit,
     onRemoveBlossomServer: (String) -> Unit,
     onProbeAllEndpoints: () -> Unit,
+    onMaintainRelays: () -> Unit,
     onPublishNip65AndBlossom: () -> Unit,
     onOpenIdentityVault: () -> Unit,
     onOpenAccountMenu: () -> Unit,
@@ -106,7 +108,7 @@ fun RelayManagementScreen(
                         IconButton(
                             onClick = onOpenAccountMenu,
                             modifier = Modifier
-                                .size(44.dp)
+                                .size(48.dp)
                                 .testTag("node_drawer_button")
                         ) {
                             Icon(
@@ -119,7 +121,7 @@ fun RelayManagementScreen(
                         IconButton(
                             onClick = onBack,
                             modifier = Modifier
-                                .size(44.dp)
+                                .size(48.dp)
                                 .testTag("relay_back_btn")
                         ) {
                             Icon(
@@ -403,6 +405,25 @@ fun RelayManagementScreen(
                         Text("Identity & Signer Vault", fontWeight = FontWeight.Bold, fontSize = 11.sp)
                     }
                 }
+
+                OutlinedButton(
+                    onClick = onMaintainRelays,
+                    enabled = !isWorking,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .testTag("relay_auto_discover_prune_btn"),
+                    border = BorderStroke(1.dp, CyberMint.copy(alpha = 0.7f)),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = CyberMint)
+                ) {
+                    Icon(Icons.Default.Router, contentDescription = null, modifier = Modifier.size(16.dp), tint = CyberMint)
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = "Auto-Discover Relays & Drop Dead",
+                        fontWeight = FontWeight.Black,
+                        fontSize = 12.sp
+                    )
+                }
             }
         }
 
@@ -608,19 +629,31 @@ private fun RelayItemCard(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+                val isDead = AdaptiveNetworkEngine.isRelayDead(relay.health, relay.statusInfo)
+                val nips = relay.health?.supportedNipsCsv
+                    ?.split(',')
+                    ?.mapNotNull { it.trim().toIntOrNull() }
+                    ?.toSet()
+                    .orEmpty()
+                val roleLabel = buildString {
+                    if (relay.readEnabled) append("R")
+                    if (relay.writeEnabled) append("W")
+                }.ifBlank { "OFF" }
                 Text(
                     text = buildString {
-                        append(status.name)
+                        append(if (isDead) "DEAD" else status.name)
+                        append(" • $roleLabel")
                         val lat = relay.health?.avgLatencyMs?.takeIf { it > 0L } ?: relay.statusInfo.latencyMs?.takeIf { it > 0L }
                         if (lat != null) append(" • ${lat}ms")
                         append(" • ${relay.statusInfo.eventsReceived} rx")
-                        if (relay.health?.authRequired == true) append(" • NIP-42 AUTH")
+                        if (50 in nips) append(" • NIP-50")
+                        if (relay.health?.authRequired == true) append(" • AUTH")
                     },
                     style = MaterialTheme.typography.labelSmall,
-                    color = BreGray100
+                    color = if (isDead) CoralAlert else BreGray100
                 )
             }
-            IconButton(onClick = onReconnect, modifier = Modifier.size(36.dp)) {
+            IconButton(onClick = onReconnect, modifier = Modifier.size(48.dp)) {
                 Icon(
                     Icons.Default.Refresh,
                     contentDescription = "Reconnect Relay",
@@ -628,7 +661,7 @@ private fun RelayItemCard(
                     modifier = Modifier.size(18.dp)
                 )
             }
-            IconButton(onClick = onRemove, modifier = Modifier.size(36.dp)) {
+            IconButton(onClick = onRemove, modifier = Modifier.size(48.dp)) {
                 Icon(
                     Icons.Default.Delete,
                     contentDescription = "Remove Relay",
@@ -689,7 +722,7 @@ private fun BlossomMirrorCard(
                 )
             }
             if (!server.isPrimary) {
-                IconButton(onClick = onSetPrimary, modifier = Modifier.size(36.dp)) {
+                IconButton(onClick = onSetPrimary, modifier = Modifier.size(48.dp)) {
                     Icon(
                         Icons.Default.Star,
                         contentDescription = "Set Primary Blossom Server",
@@ -698,7 +731,7 @@ private fun BlossomMirrorCard(
                     )
                 }
             }
-            IconButton(onClick = onRemove, modifier = Modifier.size(36.dp)) {
+            IconButton(onClick = onRemove, modifier = Modifier.size(48.dp)) {
                 Icon(
                     Icons.Default.Delete,
                     contentDescription = "Remove Blossom Mirror",

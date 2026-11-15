@@ -41,6 +41,10 @@ class RelayPoolClient(
             ?.let { add(it) }
     }
     private val connectStartTimes = ConcurrentHashMap<String, Long>()
+    private val lastActivityTimes = ConcurrentHashMap<String, Long>()
+    private val socketOpenedSignals = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
+    private val pendingOutboxRequests = ConcurrentHashMap<String, MutableList<String>>()
+    private val ephemeralLastUsedAt = ConcurrentHashMap<String, Long>()
     private val pendingOkCallbacks = ConcurrentHashMap<String, CompletableDeferred<RelayPublishReceipt>>()
     private val queryBuffers = ConcurrentHashMap<String, MutableList<NostrEvent>>()
     private val queryEoseSignals = ConcurrentHashMap<String, CompletableDeferred<Unit>>()
@@ -54,6 +58,11 @@ class RelayPoolClient(
     val incomingEvents: SharedFlow<Pair<String, NostrEvent>> = _incomingEvents.asSharedFlow()
 
     var healthObserver: ((url: String, success: Boolean, latencyMs: Long?, errorReason: String?) -> Unit)? = null
+
+    data class DroppedConnectionReport(
+        val closedSockets: List<String>,
+        val expiredEphemeral: List<String>
+    )
 
     fun syncRelays(urls: List<String>) {
         val normalizedSet = urls.map { normalizeRelayUrl(it) }.filter { it.isNotBlank() }.toSet()
@@ -74,13 +83,37 @@ class RelayPoolClient(
     fun connectRelay(rawUrl: String, isEphemeralOutbox: Boolean = false) {
         val url = normalizeRelayUrl(rawUrl)
         if (url.isBlank()) return
+        val now = System.currentTimeMillis()
         if (isEphemeralOutbox) {
-            if (sockets.containsKey(url)) return
-            if (ephemeralOutboxUrls.size >= 8) return
+            if (sockets.containsKey(url)) {
+                ephemeralLastUsedAt[url] = now
+                return
+            }
+            if (ephemeralOutboxUrls.size >= 12) {
+                // Evict oldest ephemeral outbox connection before dialing a fresh one
+                val oldest = ephemeralLastUsedAt.entries
+                    .filter { it.key in ephemeralOutboxUrls }
+                    .minByOrNull { it.value }
+                    ?.key
+                if (oldest != null) {
+                    disconnectRelay(oldest, removeFromMap = true)
+                } else {
+                    return
+                }
+            }
             ephemeralOutboxUrls.add(url)
+            ephemeralLastUsedAt[url] = now
+        } else {
+            ephemeralOutboxUrls.remove(url)
+            ephemeralLastUsedAt.remove(url)
         }
         sockets.remove(url)?.cancel()
-        connectStartTimes[url] = System.currentTimeMillis()
+        socketOpenedSignals.remove(url)?.complete(false)
+        val openedSignal = CompletableDeferred<Boolean>()
+        socketOpenedSignals[url] = openedSignal
+        connectStartTimes[url] = now
+        lastActivityTimes[url] = now
+
         if (!isEphemeralOutbox) {
             updateStatus(url) {
                 RelayStatusInfo(
@@ -94,6 +127,10 @@ class RelayPoolClient(
         val request = runCatching {
             Request.Builder().url(url).build()
         }.getOrElse { err ->
+            openedSignal.complete(false)
+            ephemeralOutboxUrls.remove(url)
+            ephemeralLastUsedAt.remove(url)
+            pendingOutboxRequests.remove(url)
             if (!isEphemeralOutbox) {
                 updateStatus(url) {
                     RelayStatusInfo(
@@ -109,8 +146,14 @@ class RelayPoolClient(
 
         val ws = okHttpClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                val rtt = (System.currentTimeMillis() - (connectStartTimes[url] ?: System.currentTimeMillis()))
-                    .coerceAtLeast(1L)
+                val openTime = System.currentTimeMillis()
+                val rtt = (openTime - (connectStartTimes[url] ?: openTime)).coerceAtLeast(1L)
+                lastActivityTimes[url] = openTime
+                if (isEphemeralOutbox) {
+                    ephemeralLastUsedAt[url] = openTime
+                }
+                openedSignal.complete(true)
+
                 if (!isEphemeralOutbox) {
                     updateStatus(url) { prev ->
                         (prev ?: RelayStatusInfo(url = url)).copy(
@@ -122,6 +165,11 @@ class RelayPoolClient(
                 }
                 healthObserver?.invoke(url, true, rtt, null)
                 val suffix = url.hashCode().toUInt().toString(16)
+
+                // Flush any targeted REQ messages queued while socket was opening
+                pendingOutboxRequests.remove(url)?.forEach { queuedReq ->
+                    webSocket.send(queuedReq)
+                }
 
                 // 1. Priority subscription for tracked/featured Nsite publishers
                 sendTrackedAuthorsSubscription(webSocket, "disc_tracked_$suffix")
@@ -171,12 +219,21 @@ class RelayPoolClient(
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
+                val msgTime = System.currentTimeMillis()
+                lastActivityTimes[url] = msgTime
+                if (isEphemeralOutbox) {
+                    ephemeralLastUsedAt[url] = msgTime
+                }
                 handleRelayMessage(url, webSocket, text, isEphemeralOutbox)
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
                 webSocket.close(code, reason)
                 sockets.remove(url)
+                openedSignal.complete(false)
+                ephemeralOutboxUrls.remove(url)
+                ephemeralLastUsedAt.remove(url)
+                pendingOutboxRequests.remove(url)
                 if (!isEphemeralOutbox) {
                     updateStatus(url) { prev ->
                         (prev ?: RelayStatusInfo(url = url)).copy(
@@ -189,6 +246,10 @@ class RelayPoolClient(
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 sockets.remove(url)
+                openedSignal.complete(false)
+                ephemeralOutboxUrls.remove(url)
+                ephemeralLastUsedAt.remove(url)
+                pendingOutboxRequests.remove(url)
                 val msg = t.localizedMessage?.take(60) ?: "Connection failed"
                 if (!isEphemeralOutbox) {
                     updateStatus(url) { prev ->
@@ -202,6 +263,85 @@ class RelayPoolClient(
             }
         })
         sockets[url] = ws
+    }
+
+    /**
+     * Suspends briefly until `rawUrl`'s WebSocket finishes its handshake (or fails/times out),
+     * preventing dropped frames on freshly dialed outbox or targeted relays.
+     */
+    suspend fun awaitSocketReady(rawUrl: String, timeoutMs: Long = 1200L): Boolean {
+        val url = normalizeRelayUrl(rawUrl)
+        if (url.isBlank()) return false
+        val status = _relayStatuses.value[url]?.status
+        if (status == RelayConnectionStatus.CONNECTED && sockets.containsKey(url)) {
+            return true
+        }
+        val signal = socketOpenedSignals[url]
+        if (signal != null) {
+            return withTimeoutOrNull(timeoutMs) { signal.await() } == true && sockets.containsKey(url)
+        }
+        return sockets.containsKey(url) && status != RelayConnectionStatus.ERROR
+    }
+
+    /**
+     * Detects, closes, and evicts dead, errored, stalled-connecting, or idle ephemeral sockets
+     * so failed endpoints don't leak descriptors or stall targeted queries.
+     */
+    fun dropDeadConnections(
+        explicitDeadUrls: Set<String> = emptySet(),
+        hungConnectingMs: Long = 10_000L,
+        staleIdleEphemeralMs: Long = 90_000L,
+        nowMs: Long = System.currentTimeMillis()
+    ): DroppedConnectionReport {
+        val normalizedExplicit = explicitDeadUrls.map { normalizeRelayUrl(it) }.filter { it.isNotBlank() }.toSet()
+        val closedSockets = mutableListOf<String>()
+        val expiredEphemeral = mutableListOf<String>()
+
+        val candidateUrls = (sockets.keys + _relayStatuses.value.keys + ephemeralOutboxUrls + normalizedExplicit).toSet()
+        for (url in candidateUrls) {
+            val statusInfo = _relayStatuses.value[url]
+            val startAt = connectStartTimes[url] ?: 0L
+            val isHungConnecting = statusInfo?.status == RelayConnectionStatus.CONNECTING &&
+                startAt > 0L &&
+                (nowMs - startAt) >= hungConnectingMs
+            val isExplicitDead = url in normalizedExplicit
+            val isDeadState = statusInfo?.status == RelayConnectionStatus.ERROR ||
+                (statusInfo?.status == RelayConnectionStatus.DISCONNECTED && sockets.containsKey(url))
+            val isEphemeralIdle = url in ephemeralOutboxUrls &&
+                (nowMs - (ephemeralLastUsedAt[url] ?: startAt)) >= staleIdleEphemeralMs
+
+            if (isExplicitDead || isHungConnecting || isDeadState || isEphemeralIdle) {
+                val removedWs = sockets.remove(url)
+                if (removedWs != null) {
+                    runCatching { removedWs.close(1000, "Dropped dead relay") }
+                    runCatching { removedWs.cancel() }
+                    closedSockets.add(url)
+                }
+                socketOpenedSignals.remove(url)?.complete(false)
+                pendingOutboxRequests.remove(url)
+                connectStartTimes.remove(url)
+                lastActivityTimes.remove(url)
+                if (ephemeralOutboxUrls.remove(url) || isEphemeralIdle) {
+                    ephemeralLastUsedAt.remove(url)
+                    expiredEphemeral.add(url)
+                }
+                if (isExplicitDead || isHungConnecting) {
+                    val existing = _relayStatuses.value[url]
+                    if (existing != null) {
+                        updateStatus(url) {
+                            existing.copy(
+                                status = RelayConnectionStatus.DISCONNECTED,
+                                lastMessage = if (isHungConnecting) "Dropped (connect timeout)" else "Dropped dead relay"
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        return DroppedConnectionReport(
+            closedSockets = closedSockets.distinct(),
+            expiredEphemeral = expiredEphemeral.distinct()
+        )
     }
 
     /**
@@ -313,9 +453,17 @@ class RelayPoolClient(
     fun disconnectRelay(rawUrl: String, removeFromMap: Boolean = false) {
         val url = normalizeRelayUrl(rawUrl)
         ephemeralOutboxUrls.remove(url)
-        sockets.remove(url)?.close(1000, "Removed by user")
+        ephemeralLastUsedAt.remove(url)
+        pendingOutboxRequests.remove(url)
+        socketOpenedSignals.remove(url)?.complete(false)
+        sockets.remove(url)?.let { ws ->
+            runCatching { ws.close(1000, "Removed") }
+            runCatching { ws.cancel() }
+        }
         if (removeFromMap) {
             _relayStatuses.update { it - url }
+            connectStartTimes.remove(url)
+            lastActivityTimes.remove(url)
         } else {
             updateStatus(url) { prev ->
                 (prev ?: RelayStatusInfo(url = url)).copy(
@@ -326,11 +474,55 @@ class RelayPoolClient(
         }
     }
 
-    fun requestAuthorMetadata(pubkeyHex: String) {
-        requestAuthorsMetadata(listOf(pubkeyHex))
+    private fun sendMsgToRelevantSockets(
+        msg: String,
+        targetRelayUrls: List<String>,
+        connectMissingAsEphemeral: Boolean = false
+    ) {
+        val now = System.currentTimeMillis()
+        val normalizedTargets = targetRelayUrls
+            .map { normalizeRelayUrl(it) }
+            .filter { it.isNotBlank() }
+            .distinct()
+
+        if (normalizedTargets.isEmpty()) {
+            // Fall back to currently healthy connected sockets (avoid blasting errored/dead sockets)
+            sockets.forEach { (url, ws) ->
+                val status = _relayStatuses.value[url]?.status
+                if (status != RelayConnectionStatus.ERROR && status != RelayConnectionStatus.DISCONNECTED) {
+                    if (url in ephemeralOutboxUrls) ephemeralLastUsedAt[url] = now
+                    ws.send(msg)
+                }
+            }
+            return
+        }
+
+        for (targetUrl in normalizedTargets) {
+            val status = _relayStatuses.value[targetUrl]?.status
+            if (status == RelayConnectionStatus.ERROR) continue
+            val existingWs = sockets[targetUrl]
+            if (existingWs != null && status == RelayConnectionStatus.CONNECTED) {
+                if (targetUrl in ephemeralOutboxUrls) ephemeralLastUsedAt[targetUrl] = now
+                existingWs.send(msg)
+            } else if (existingWs != null && status == RelayConnectionStatus.CONNECTING) {
+                pendingOutboxRequests.getOrPut(targetUrl) { java.util.Collections.synchronizedList(mutableListOf()) }
+                    .add(msg)
+            } else if (connectMissingAsEphemeral) {
+                pendingOutboxRequests.getOrPut(targetUrl) { java.util.Collections.synchronizedList(mutableListOf()) }
+                    .add(msg)
+                connectRelay(targetUrl, isEphemeralOutbox = true)
+            }
+        }
     }
 
-    fun requestAuthorsMetadata(pubkeys: Collection<String>) {
+    fun requestAuthorMetadata(pubkeyHex: String, targetRelayUrls: List<String> = emptyList()) {
+        requestAuthorsMetadata(listOf(pubkeyHex), targetRelayUrls)
+    }
+
+    fun requestAuthorsMetadata(
+        pubkeys: Collection<String>,
+        targetRelayUrls: List<String> = emptyList()
+    ) {
         val clean = pubkeys.map { it.trim().lowercase() }
             .filter { it.length == 64 && it.all { ch -> ch.isDigit() || ch in 'a'..'f' } }
             .distinct()
@@ -340,27 +532,33 @@ class RelayPoolClient(
             val subId = "meta_${UUID.randomUUID().toString().take(8)}"
             val authorsArr = JSONArray()
             chunk.forEach { authorsArr.put(it) }
-            val filter = JSONObject().apply {
-                put("kinds", JSONArray().put(NostrKinds.METADATA))
+            val metaFilter = JSONObject().apply {
+                put("kinds", JSONArray().put(NostrKinds.METADATA).put(NostrKinds.RELAY_LIST))
                 put("authors", authorsArr)
-                put("limit", chunk.size * 2)
+                put("limit", chunk.size * 3)
             }
-            val msg = JSONArray().put("REQ").put(subId).put(filter).toString()
-            sockets.values.forEach { it.send(msg) }
+            val msg = JSONArray().put("REQ").put(subId).put(metaFilter).toString()
+            sendMsgToRelevantSockets(
+                msg = msg,
+                targetRelayUrls = targetRelayUrls,
+                connectMissingAsEphemeral = targetRelayUrls.isNotEmpty()
+            )
         }
     }
 
-    fun trackAndQueryAuthor(pubkeyHex: String, extraOutboxRelays: List<String> = emptyList()) {
+    fun trackAndQueryAuthor(
+        pubkeyHex: String,
+        extraOutboxRelays: List<String> = emptyList(),
+        targetRelayUrls: List<String> = emptyList()
+    ) {
         val pk = pubkeyHex.trim().lowercase()
         if (pk.length != 64) return
         trackedAuthorPubkeys.add(pk)
 
-        extraOutboxRelays.forEach { rawUrl ->
-            val norm = normalizeRelayUrl(rawUrl)
-            if ((norm.startsWith("wss://") || norm.startsWith("ws://")) && !sockets.containsKey(norm)) {
-                connectRelay(norm, isEphemeralOutbox = true)
-            }
-        }
+        val combinedTargets = (extraOutboxRelays + targetRelayUrls)
+            .map { normalizeRelayUrl(it) }
+            .filter { it.startsWith("wss://") || it.startsWith("ws://") }
+            .distinct()
 
         val subId = "disc_author_${UUID.randomUUID().toString().take(8)}"
         val (manifestsFilter, metaAndOutboxFilter) = buildAuthorBundleFilters(listOf(pk))
@@ -370,10 +568,15 @@ class RelayPoolClient(
             .put(manifestsFilter)
             .put(metaAndOutboxFilter)
             .toString()
-        sockets.values.forEach { ws -> ws.send(msg) }
+
+        if (combinedTargets.isNotEmpty()) {
+            sendMsgToRelevantSockets(msg, combinedTargets, connectMissingAsEphemeral = true)
+        } else {
+            sendMsgToRelevantSockets(msg, emptyList(), connectMissingAsEphemeral = false)
+        }
     }
 
-    fun refreshDiscoveryCatalog() {
+    fun refreshDiscoveryCatalog(targetRelayUrls: List<String> = emptyList()) {
         val token = UUID.randomUUID().toString().take(6)
         val filterNamedNsites = JSONObject().apply {
             put("kinds", JSONArray().put(NostrKinds.NSITE_NAMED))
@@ -406,7 +609,10 @@ class RelayPoolClient(
             .toString()
         val nip51Msg = JSONArray().put("REQ").put("disc_list_$token").put(filterNip51).toString()
 
+        val allowSet = targetRelayUrls.map { normalizeRelayUrl(it) }.filter { it.isNotBlank() }.toSet()
+
         sockets.forEach { (url, ws) ->
+            if (allowSet.isNotEmpty() && url !in allowSet) return@forEach
             val st = _relayStatuses.value[url]?.status
             if (st == RelayConnectionStatus.CONNECTED || url in ephemeralOutboxUrls) {
                 sendTrackedAuthorsSubscription(ws, "disc_tracked_$token")
@@ -414,13 +620,14 @@ class RelayPoolClient(
                     ws.send(nsiteMsg)
                     ws.send(nip51Msg)
                 }
-            } else if (st != RelayConnectionStatus.CONNECTING) {
-                connectRelay(url)
             }
         }
     }
 
-    fun requestManifestsByCoordinates(coordinates: List<String>) {
+    fun requestManifestsByCoordinates(
+        coordinates: List<String>,
+        targetRelayUrls: List<String> = emptyList()
+    ) {
         if (coordinates.isEmpty()) return
         val kinds = HashSet<Int>()
         val authors = HashSet<String>()
@@ -456,7 +663,11 @@ class RelayPoolClient(
             put("limit", 40)
         }
         val reqMsg = JSONArray().put("REQ").put(subId).put(filter).toString()
-        sockets.values.forEach { ws -> ws.send(reqMsg) }
+        sendMsgToRelevantSockets(
+            msg = reqMsg,
+            targetRelayUrls = targetRelayUrls,
+            connectMissingAsEphemeral = targetRelayUrls.isNotEmpty()
+        )
     }
 
     suspend fun queryEventsOnce(
@@ -464,17 +675,43 @@ class RelayPoolClient(
         timeoutMs: Long = 3200L,
         specificRelays: List<String> = emptyList()
     ): List<NostrEvent> {
-        specificRelays.forEach { raw ->
-            val norm = normalizeRelayUrl(raw)
-            if (norm.isNotBlank() && !sockets.containsKey(norm)) {
+        val now = System.currentTimeMillis()
+        val requestedUrls = specificRelays
+            .map { normalizeRelayUrl(it) }
+            .filter { it.isNotBlank() }
+            .distinct()
+
+        requestedUrls.forEach { norm ->
+            if (!sockets.containsKey(norm)) {
                 connectRelay(norm, isEphemeralOutbox = true)
+            } else if (norm in ephemeralOutboxUrls) {
+                ephemeralLastUsedAt[norm] = now
             }
         }
-        val targetSockets = if (specificRelays.isNotEmpty()) {
-            val allowed = specificRelays.map { normalizeRelayUrl(it) }.toSet()
-            sockets.filterKeys { it in allowed }.values.toList().ifEmpty { sockets.values.toList() }
+
+        // Briefly await newly dialed WebSocket handshakes so targeted queries don't miss onOpen
+        val pendingDialUrls = requestedUrls.filter { url ->
+            _relayStatuses.value[url]?.status != RelayConnectionStatus.CONNECTED
+        }
+        if (pendingDialUrls.isNotEmpty()) {
+            val waitBudget = minOf(850L, (timeoutMs / 3L).coerceAtLeast(250L))
+            pendingDialUrls.forEach { url ->
+                awaitSocketReady(url, waitBudget)
+            }
+        }
+
+        val targetSockets = if (requestedUrls.isNotEmpty()) {
+            val allowed = requestedUrls.toSet()
+            sockets.filterKeys { it in allowed }.values.toList()
+                .ifEmpty {
+                    sockets.filterKeys { url ->
+                        _relayStatuses.value[url]?.status == RelayConnectionStatus.CONNECTED
+                    }.values.toList()
+                }
         } else {
-            sockets.values.toList()
+            sockets.filterKeys { url ->
+                _relayStatuses.value[url]?.status != RelayConnectionStatus.ERROR
+            }.values.toList()
         }
         if (targetSockets.isEmpty()) return emptyList()
 
@@ -535,7 +772,12 @@ class RelayPoolClient(
 
         urls.forEach { url ->
             if (sockets[url] == null) {
-                connectRelay(url)
+                connectRelay(url, isEphemeralOutbox = url !in _relayStatuses.value)
+            }
+        }
+        urls.forEach { url ->
+            if (_relayStatuses.value[url]?.status != RelayConnectionStatus.CONNECTED) {
+                awaitSocketReady(url, timeoutMs = 850L)
             }
         }
 
@@ -658,15 +900,7 @@ class RelayPoolClient(
             put("since", (System.currentTimeMillis() / 1000L) - 30L)
         }
         val reqMsg = JSONArray().put("REQ").put(subId).put(filter).toString()
-        bunkerRelays.forEach { raw ->
-            val norm = normalizeRelayUrl(raw)
-            if (norm.isNotBlank()) {
-                if (!sockets.containsKey(norm)) {
-                    connectRelay(norm, isEphemeralOutbox = true)
-                }
-                sockets[norm]?.send(reqMsg)
-            }
-        }
+        sendMsgToRelevantSockets(reqMsg, bunkerRelays, connectMissingAsEphemeral = true)
         return subId
     }
 

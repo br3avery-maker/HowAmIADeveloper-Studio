@@ -14,6 +14,7 @@ import com.example.nostr.NostrKinds
 import com.example.nostr.NsiteAddressResolver
 import com.example.nostr.NsiteSpamFilter
 import com.example.nostr.RelayPoolClient
+import com.example.nostr.RelayMaintenanceSummary
 import com.example.nostr.RelayPublishSummary
 import com.example.nostr.RelayStatusInfo
 import com.example.nostr.SignerType
@@ -107,6 +108,7 @@ class ShellRepository(
     private val legacyNsitePathCache = ConcurrentHashMap<String, MutableMap<String, String>>()
     private val metadataRequestedTimestamps = ConcurrentHashMap<String, Long>()
     private val processedEventIds = ConcurrentHashMap.newKeySet<String>()
+    private val lastAutoMaintainMs = java.util.concurrent.atomic.AtomicLong(0L)
 
     val accountsFlow: Flow<List<VaultAccountEntity>> = dao.observeAccounts()
     val activeAccountFlow: Flow<VaultAccountEntity?> = dao.observeActiveAccount()
@@ -274,12 +276,25 @@ class ShellRepository(
         purgeLegacyFakeSeedApplets()
         purgeCachedSpamApplets(active?.pubkeyHex.orEmpty())
 
-        // 5. Prioritize live NIP-5A Nsites & Kind 0 profile metadata
+        // 5. Prioritize live NIP-5A Nsites & Kind 0 profile metadata using targeted relays
         if (NostrCrypto.DEFAULT_FEATURED_CREATOR_PUBKEY_HEX.length == 64) {
-            relayPool.trackAndQueryAuthor(NostrCrypto.DEFAULT_FEATURED_CREATOR_PUBKEY_HEX)
+            val featuredTargets = networkEngine.selectRelaysForOperation(
+                operation = NetworkOperationType.DISCOVER_NSITES,
+                targetAuthorPubkeys = listOf(NostrCrypto.DEFAULT_FEATURED_CREATOR_PUBKEY_HEX),
+                limit = 6
+            )
+            relayPool.trackAndQueryAuthor(
+                NostrCrypto.DEFAULT_FEATURED_CREATOR_PUBKEY_HEX,
+                targetRelayUrls = featuredTargets
+            )
         }
         active?.let {
-            relayPool.requestAuthorMetadata(it.pubkeyHex)
+            val metaTargets = networkEngine.selectRelaysForOperation(
+                operation = NetworkOperationType.FETCH_METADATA,
+                targetAuthorPubkeys = listOf(it.pubkeyHex),
+                limit = 5
+            )
+            relayPool.requestAuthorMetadata(it.pubkeyHex, targetRelayUrls = metaTargets)
             if (it.resolvedSignerType == SignerType.NIP46_BUNKER && it.bunkerUri.isNotBlank()) {
                 ExternalSignerManager.parseBunkerUri(it.bunkerUri)?.let { bunker ->
                     if (it.bunkerClientPubkeyHex.length == 64) {
@@ -289,6 +304,9 @@ class ShellRepository(
             }
         }
         requestMissingPublisherProfiles()
+        repoScope.launch {
+            runCatching { maintainRelaysAutoDiscoverAndDropDead() }
+        }
     }
 
     suspend fun purgeLegacyFakeSeedApplets(): Int = withContext(Dispatchers.IO) {
@@ -335,7 +353,12 @@ class ShellRepository(
         }
         if (toQuery.isNotEmpty()) {
             toQuery.forEach { metadataRequestedTimestamps[it] = now }
-            relayPool.requestAuthorsMetadata(toQuery)
+            val metaRelays = networkEngine.selectRelaysForOperation(
+                operation = NetworkOperationType.FETCH_METADATA,
+                targetAuthorPubkeys = toQuery,
+                limit = 6
+            )
+            relayPool.requestAuthorsMetadata(toQuery, targetRelayUrls = metaRelays)
         }
     }
 
@@ -346,14 +369,30 @@ class ShellRepository(
         val prev = metadataRequestedTimestamps[pk] ?: 0L
         if (now - prev > 300_000L) {
             metadataRequestedTimestamps[pk] = now
-            relayPool.requestAuthorMetadata(pk)
+            repoScope.launch {
+                val metaRelays = networkEngine.selectRelaysForOperation(
+                    operation = NetworkOperationType.FETCH_METADATA,
+                    targetAuthorPubkeys = listOf(pk),
+                    limit = 5
+                )
+                relayPool.requestAuthorMetadata(pk, targetRelayUrls = metaRelays)
+            }
         }
     }
 
     fun lookupPublisherAndSync(rawNpubOrHex: String): String? {
         val resolvedHex = NostrCrypto.resolvePubkeyHex(rawNpubOrHex) ?: return null
         metadataRequestedTimestamps[resolvedHex] = System.currentTimeMillis()
-        relayPool.trackAndQueryAuthor(resolvedHex)
+        val cachedOutbox = networkEngine.getAuthorWriteRelays(resolvedHex)
+        relayPool.trackAndQueryAuthor(resolvedHex, cachedOutbox, targetRelayUrls = cachedOutbox)
+        repoScope.launch {
+            val targets = networkEngine.selectRelaysForOperation(
+                operation = NetworkOperationType.DISCOVER_NSITES,
+                targetAuthorPubkeys = listOf(resolvedHex),
+                limit = 6
+            )
+            relayPool.trackAndQueryAuthor(resolvedHex, cachedOutbox, targetRelayUrls = targets)
+        }
         return resolvedHex
     }
 
@@ -361,11 +400,24 @@ class ShellRepository(
         val active = dao.getActiveAccount()
         purgeLegacyFakeSeedApplets()
         purgeCachedSpamApplets(active?.pubkeyHex.orEmpty())
-        relayPool.refreshDiscoveryCatalog()
+        val discoveryRelays = networkEngine.selectRelaysForOperation(
+            operation = NetworkOperationType.DISCOVER_NSITES,
+            limit = 7
+        )
+        relayPool.refreshDiscoveryCatalog(targetRelayUrls = discoveryRelays)
         if (NostrCrypto.DEFAULT_FEATURED_CREATOR_PUBKEY_HEX.length == 64) {
-            relayPool.trackAndQueryAuthor(NostrCrypto.DEFAULT_FEATURED_CREATOR_PUBKEY_HEX)
+            val featuredTargets = networkEngine.selectRelaysForOperation(
+                operation = NetworkOperationType.DISCOVER_NSITES,
+                targetAuthorPubkeys = listOf(NostrCrypto.DEFAULT_FEATURED_CREATOR_PUBKEY_HEX),
+                limit = 6
+            )
+            relayPool.trackAndQueryAuthor(
+                NostrCrypto.DEFAULT_FEATURED_CREATOR_PUBKEY_HEX,
+                targetRelayUrls = featuredTargets
+            )
         }
         requestMissingPublisherProfiles(force = true)
+        maintainRelaysAutoDiscoverAndDropDead()
     }
 
     suspend fun ingestNostrEvent(event: NostrEvent) {
@@ -402,27 +454,51 @@ class ShellRepository(
     private fun handleIncomingRelayList(event: NostrEvent) {
         val pk = event.pubkey.trim().lowercase()
         if (pk.length != 64) return
-        val isFeatured = pk.equals(NostrCrypto.DEFAULT_FEATURED_CREATOR_PUBKEY_HEX, ignoreCase = true)
-        if (!isFeatured && !metadataRequestedTimestamps.containsKey(pk)) return
 
-        val writeRelays = event.tags
-            .filter { row ->
-                if (row.size < 2 || row[0] != "r") return@filter false
-                val rawUrl = row[1].trim()
-                val validScheme = rawUrl.startsWith("wss://", ignoreCase = true) ||
-                    rawUrl.startsWith("ws://", ignoreCase = true)
-                val noCredsOrFragment = !rawUrl.contains('#') && !rawUrl.substringAfter("://").substringBefore('/').contains('@')
-                val marker = if (row.size >= 3) row[2].trim().lowercase() else ""
-                val validWriteRole = marker.isEmpty() || marker == "write"
-                validScheme && noCredsOrFragment && validWriteRole
+        val writeRelays = mutableListOf<String>()
+        val readRelays = mutableListOf<String>()
+        event.tags.forEach { row ->
+            if (row.size < 2 || row[0] != "r") return@forEach
+            val norm = RelayPoolClient.normalizeRelayUrl(row[1])
+            val validUrl = AdaptiveNetworkEngine.isAutoDiscoverableRelayUrl(norm) || norm.startsWith("ws://127.0.0.1")
+            if (!validUrl) return@forEach
+            val marker = if (row.size >= 3) row[2].trim().lowercase() else ""
+            when (marker) {
+                "" -> {
+                    writeRelays.add(norm)
+                    readRelays.add(norm)
+                }
+                "write" -> writeRelays.add(norm)
+                "read" -> readRelays.add(norm)
             }
-            .map { RelayPoolClient.normalizeRelayUrl(it[1]) }
-            .filter { it.isNotBlank() }
-            .distinct()
-            .take(4)
+        }
 
-        if (writeRelays.isNotEmpty()) {
-            relayPool.trackAndQueryAuthor(pk, writeRelays)
+        val cleanWrite = writeRelays.distinct().take(6)
+        val cleanRead = readRelays.distinct().take(6)
+        if (cleanWrite.isEmpty() && cleanRead.isEmpty()) return
+
+        networkEngine.recordAuthorNip65Relays(
+            pubkeyHex = pk,
+            writeRelays = cleanWrite,
+            readRelays = cleanRead,
+            createdAtSec = event.createdAt
+        )
+
+        val isFeatured = pk.equals(NostrCrypto.DEFAULT_FEATURED_CREATOR_PUBKEY_HEX, ignoreCase = true)
+        if ((isFeatured || metadataRequestedTimestamps.containsKey(pk)) && cleanWrite.isNotEmpty()) {
+            relayPool.trackAndQueryAuthor(
+                pubkeyHex = pk,
+                extraOutboxRelays = cleanWrite.take(4),
+                targetRelayUrls = cleanWrite.take(4)
+            )
+        }
+
+        val now = System.currentTimeMillis()
+        val prevMaintain = lastAutoMaintainMs.get()
+        if (now - prevMaintain > 90_000L && lastAutoMaintainMs.compareAndSet(prevMaintain, now)) {
+            repoScope.launch {
+                runCatching { networkEngine.maintainRelays(cleanWrite + cleanRead) }
+            }
         }
     }
 
@@ -593,7 +669,12 @@ class ShellRepository(
 
         val missingCoords = coordinates.filter { dao.getAppletById(it) == null }
         if (missingCoords.isNotEmpty()) {
-            relayPool.requestManifestsByCoordinates(missingCoords)
+            val targetRelays = networkEngine.selectRelaysForOperation(
+                operation = NetworkOperationType.RESOLVE_MANIFEST,
+                targetAuthorPubkeys = listOf(event.pubkey),
+                limit = 6
+            )
+            relayPool.requestManifestsByCoordinates(missingCoords, targetRelayUrls = targetRelays)
         }
     }
 
@@ -684,6 +765,13 @@ class ShellRepository(
         while (keys.hasNext()) {
             if (!keys.next().startsWith("__")) fileCount++
         }
+        val relayHintTags = event.tags
+            .filter { it.size >= 2 && (it[0] == "relay" || it[0] == "relays" || it[0] == "r") }
+            .map { it[1].trim() }
+        if (relayHintTags.isNotEmpty()) {
+            networkEngine.recordRelayHints(relayHintTags, "manifest:${event.id.take(8)}")
+        }
+
         val serversCsv = event.tags
             .filter { it.size >= 2 && (it[0] == "server" || it[0] == "blossom") }
             .map { it[1].trim().trimEnd('/') }
@@ -754,6 +842,7 @@ class ShellRepository(
         when (target) {
             is NsiteAddressResolver.ResolvedNsiteTarget.Nip5aCoordinate -> {
                 val pk = target.authorPubkeyHex.lowercase()
+                networkEngine.recordRelayHints(target.relayHints, "naddr:${target.dTag}")
                 val filter = JSONObject().apply {
                     put("authors", JSONArray().put(pk))
                     if (target.kind == NostrKinds.NSITE_ROOT) {
@@ -766,15 +855,16 @@ class ShellRepository(
                 }
                 val candidateRelays = networkEngine.selectRelaysForOperation(
                     operation = NetworkOperationType.RESOLVE_MANIFEST,
-                    extraCandidateRelays = target.relayHints
+                    extraCandidateRelays = target.relayHints,
+                    targetAuthorPubkeys = listOf(pk),
+                    limit = 8
                 )
                 val events = relayPool.queryEventsOnce(
                     filterJson = filter,
                     timeoutMs = 3500L,
-                    specificRelays = candidateRelays.take(8)
+                    specificRelays = candidateRelays
                 )
-                // Also fetch author Blossom servers (Kind 10063) concurrently if available
-                fetchAuthorBlossomServers(pk)
+                fetchAuthorBlossomServers(pk, candidateRelays.take(6))
 
                 events.sortedBy { it.createdAt }.forEach { ev ->
                     ingestNostrEvent(ev)
@@ -798,7 +888,14 @@ class ShellRepository(
 
             is NsiteAddressResolver.ResolvedNsiteTarget.AuthorAllSites -> {
                 val pk = target.authorPubkeyHex.lowercase()
-                relayPool.trackAndQueryAuthor(pk, target.relayHints)
+                networkEngine.recordRelayHints(target.relayHints, "nprofile:${pk.take(8)}")
+                val candidateRelays = networkEngine.selectRelaysForOperation(
+                    operation = NetworkOperationType.RESOLVE_MANIFEST,
+                    extraCandidateRelays = target.relayHints,
+                    targetAuthorPubkeys = listOf(pk),
+                    limit = 8
+                )
+                relayPool.trackAndQueryAuthor(pk, target.relayHints, targetRelayUrls = candidateRelays)
                 val filter = JSONObject().apply {
                     put("authors", JSONArray().put(pk))
                     put(
@@ -810,16 +907,12 @@ class ShellRepository(
                     )
                     put("limit", 50)
                 }
-                val candidateRelays = networkEngine.selectRelaysForOperation(
-                    operation = NetworkOperationType.RESOLVE_MANIFEST,
-                    extraCandidateRelays = target.relayHints
-                )
                 val events = relayPool.queryEventsOnce(
                     filterJson = filter,
                     timeoutMs = 3500L,
-                    specificRelays = candidateRelays.take(8)
+                    specificRelays = candidateRelays
                 )
-                fetchAuthorBlossomServers(pk)
+                fetchAuthorBlossomServers(pk, candidateRelays.take(6))
                 events.sortedBy { it.createdAt }.forEach { ev -> ingestNostrEvent(ev) }
 
                 val authorSites = dao.getAllCatalogAppletsList()
@@ -1246,9 +1339,16 @@ class ShellRepository(
         dao.deleteBlossomServer(clean)
     }
 
-    suspend fun probeAllNetworkHealth() = withContext(Dispatchers.IO) {
+    suspend fun probeAllNetworkHealth(): RelayMaintenanceSummary = withContext(Dispatchers.IO) {
+        val summary = networkEngine.maintainRelays()
         networkEngine.probeAllConfiguredEndpoints()
+        summary
     }
+
+    suspend fun maintainRelaysAutoDiscoverAndDropDead(): RelayMaintenanceSummary =
+        withContext(Dispatchers.IO) {
+            networkEngine.maintainRelays()
+        }
 
     suspend fun publishRelayListNip65(): RelayPublishSummary = withContext(Dispatchers.IO) {
         val active = getActiveSigningAccount() ?: error("No active signing identity")
@@ -1464,17 +1564,33 @@ class ShellRepository(
         )
     }
 
-    suspend fun fetchAuthorBlossomServers(authorPubkey: String): List<String> = withContext(Dispatchers.IO) {
+    suspend fun fetchAuthorBlossomServers(
+        authorPubkey: String,
+        specificRelays: List<String> = emptyList()
+    ): List<String> = withContext(Dispatchers.IO) {
         val pk = authorPubkey.trim().lowercase()
         if (pk.length != 64) return@withContext emptyList()
         authorBlossomCache[pk]?.let { return@withContext it }
 
+        val targetRelays = specificRelays.ifEmpty {
+            networkEngine.selectRelaysForOperation(
+                operation = NetworkOperationType.RESOLVE_MANIFEST,
+                targetAuthorPubkeys = listOf(pk),
+                limit = 6
+            )
+        }
         val filter = JSONObject().apply {
             put("kinds", JSONArray().put(NostrKinds.USER_BLOSSOM_SERVERS))
             put("authors", JSONArray().put(pk))
             put("limit", 1)
         }
-        val events = runCatching { relayPool.queryEventsOnce(filter, timeoutMs = 2000L) }.getOrDefault(emptyList())
+        val events = runCatching {
+            relayPool.queryEventsOnce(
+                filterJson = filter,
+                timeoutMs = 2000L,
+                specificRelays = targetRelays
+            )
+        }.getOrDefault(emptyList())
         val discovered = events.firstOrNull()
             ?.tags
             ?.filter {
@@ -1490,18 +1606,34 @@ class ShellRepository(
         discovered
     }
 
-    private suspend fun fetchLegacyNsitePathMap(authorPubkey: String): Map<String, String> = withContext(Dispatchers.IO) {
+    private suspend fun fetchLegacyNsitePathMap(
+        authorPubkey: String,
+        specificRelays: List<String> = emptyList()
+    ): Map<String, String> = withContext(Dispatchers.IO) {
         val pk = authorPubkey.trim().lowercase()
         if (pk.length != 64) return@withContext emptyMap()
         val cached = legacyNsitePathCache[pk]
         if (cached != null && cached.size > 1) return@withContext cached
 
+        val targetRelays = specificRelays.ifEmpty {
+            networkEngine.selectRelaysForOperation(
+                operation = NetworkOperationType.RESOLVE_MANIFEST,
+                targetAuthorPubkeys = listOf(pk),
+                limit = 6
+            )
+        }
         val filter = JSONObject().apply {
             put("kinds", JSONArray().put(NostrKinds.NSITE_LEGACY_FILE))
             put("authors", JSONArray().put(pk))
             put("limit", 120)
         }
-        val events = runCatching { relayPool.queryEventsOnce(filter, timeoutMs = 2400L) }.getOrDefault(emptyList())
+        val events = runCatching {
+            relayPool.queryEventsOnce(
+                filterJson = filter,
+                timeoutMs = 2400L,
+                specificRelays = targetRelays
+            )
+        }.getOrDefault(emptyList())
         val map = ConcurrentHashMap<String, String>()
         cached?.let { map.putAll(it) }
         events.sortedByDescending { it.createdAt }.forEach { ev ->

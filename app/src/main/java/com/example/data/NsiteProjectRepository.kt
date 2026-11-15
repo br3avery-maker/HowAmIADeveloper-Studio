@@ -79,134 +79,28 @@ class NsiteProjectRepository(
         ownerPubkeyHex: String,
         title: String,
         dTag: String,
-        targetKind: Int = NostrKinds.NSITE_NAMED
+        targetKind: Int = NostrKinds.NSITE_NAMED,
+        templateKind: NsiteTemplateKind = NsiteTemplateKind.BLANK
     ): NsiteProjectEntity = withContext(Dispatchers.IO) {
         val projectId = "proj_${UUID.randomUUID().toString().take(12)}"
-        val cleanSlug = sanitizeDTag(dTag.ifBlank { title })
+        val cleanTitle = title.trim().ifBlank { templateKind.label }
+        val cleanSlug = sanitizeDTag(dTag.ifBlank { cleanTitle }.ifBlank { templateKind.defaultSlug })
         val project = NsiteProjectEntity(
             projectId = projectId,
             ownerPubkeyHex = ownerPubkeyHex,
-            title = title.trim().ifBlank { "Untitled Nsite" },
+            title = cleanTitle,
             dTag = cleanSlug,
             targetKind = if (targetKind == NostrKinds.NSITE_ROOT) NostrKinds.NSITE_ROOT else NostrKinds.NSITE_NAMED,
-            description = "Multi-file NIP-5A static website built in SovereignShell.",
+            description = templateKind.descriptionText,
             entryPath = "/index.html",
-            sourceType = "SCRATCH"
+            sourceType = if (templateKind == NsiteTemplateKind.BLANK) "SCRATCH" else "TEMPLATE_${templateKind.name}"
         )
         dao.upsertProject(project)
 
-        val defaultHtml = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>${project.title}</title>
-  <link rel="stylesheet" href="./css/style.css" />
-</head>
-<body>
-  <main class="shell-card">
-    <span class="tag">NIP-5A NSITE</span>
-    <h1 id="headline">${project.title}</h1>
-    <p>Multi-file Nostr website hosted on Blossom with cryptographic SHA-256 path verification.</p>
-    <div class="row">
-      <button id="counterBtn" type="button">Clicks: 0</button>
-      <button id="nostrBtn" type="button" class="secondary">Verify NIP-07 Key</button>
-    </div>
-    <pre id="output">Ready.</pre>
-  </main>
-  <script type="module" src="./js/app.js"></script>
-</body>
-</html>
-        """.trimIndent()
-
-        val defaultCss = """
-:root { color-scheme: dark; }
-* { box-sizing: border-box; }
-body {
-  margin: 0;
-  min-height: 100vh;
-  display: grid;
-  place-items: center;
-  padding: 24px;
-  background: #000000;
-  color: #ffffff;
-  font-family: system-ui, -apple-system, sans-serif;
-}
-.shell-card {
-  width: min(100%, 480px);
-  padding: 24px;
-  border-radius: 20px;
-  background: #111111;
-  border: 1px solid #FF1493;
-}
-.tag {
-  display: inline-block;
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: #5B0633;
-  color: #FFB6D9;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-}
-h1 { margin: 12px 0 8px; font-size: 24px; }
-p { margin: 0 0 18px; color: #B8B8B8; line-height: 1.5; font-size: 14px; }
-.row { display: flex; gap: 10px; flex-wrap: wrap; }
-button {
-  border: 0;
-  border-radius: 12px;
-  padding: 12px 16px;
-  background: #FF1493;
-  color: #ffffff;
-  font-weight: 700;
-  cursor: pointer;
-}
-button.secondary {
-  background: #1A1A1A;
-  border: 1px solid #9A0957;
-  color: #FFB6D9;
-}
-pre {
-  margin: 16px 0 0;
-  padding: 12px;
-  border-radius: 12px;
-  background: #080808;
-  color: #FFB6D9;
-  font-size: 12px;
-  overflow-x: auto;
-}
-        """.trimIndent()
-
-        val defaultJs = """
-let count = 0;
-const counterBtn = document.getElementById('counterBtn');
-const nostrBtn = document.getElementById('nostrBtn');
-const output = document.getElementById('output');
-
-counterBtn?.addEventListener('click', () => {
-  count += 1;
-  counterBtn.textContent = 'Clicks: ' + count;
-  output.textContent = 'Interactive state updated (' + count + ')';
-});
-
-nostrBtn?.addEventListener('click', async () => {
-  if (!window.nostr) {
-    output.textContent = 'NIP-07 disabled for this view.';
-    return;
-  }
-  try {
-    const pubkey = await window.nostr.getPublicKey();
-    output.textContent = 'Active Nostr pubkey: ' + pubkey;
-  } catch (err) {
-    output.textContent = 'Signer response: ' + err.message;
-  }
-});
-        """.trimIndent()
-
-        writeFileInternal(projectId, "/index.html", defaultHtml.toByteArray(Charsets.UTF_8))
-        writeFileInternal(projectId, "/css/style.css", defaultCss.toByteArray(Charsets.UTF_8))
-        writeFileInternal(projectId, "/js/app.js", defaultJs.toByteArray(Charsets.UTF_8))
+        val templateFiles = NsiteTemplates.buildFiles(templateKind, project.title)
+        templateFiles.forEach { (path, content) ->
+            writeFileInternal(projectId, path, content.toByteArray(Charsets.UTF_8))
+        }
         project
     }
 

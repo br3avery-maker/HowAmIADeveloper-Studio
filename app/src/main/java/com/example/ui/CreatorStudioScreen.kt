@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
@@ -89,6 +90,7 @@ import androidx.compose.ui.unit.sp
 import com.example.data.InstalledAppletEntity
 import com.example.data.NsiteProjectEntity
 import com.example.data.NsiteProjectFileEntity
+import com.example.data.NsiteTemplateKind
 import com.example.data.PublishDeploymentReport
 import com.example.data.PublishVerificationBreakdown
 import com.example.data.ResolvedWebAsset
@@ -144,7 +146,7 @@ fun CreatorStudioScreen(
     latestReport: PublishDeploymentReport?,
     latestVerification: PublishVerificationBreakdown?,
     onSelectProject: (String) -> Unit,
-    onCreateScratchProject: (String, String, Int) -> Unit,
+    onCreateScratchProject: (String, String, Int, NsiteTemplateKind) -> Unit,
     onDeleteProject: (String) -> Unit,
     onImportHtmlUri: (Uri) -> Unit,
     onImportZipUri: (Uri) -> Unit,
@@ -341,7 +343,13 @@ fun CreatorStudioScreen(
                             }
                             HorizontalDivider()
                             DropdownMenuItem(
-                                text = { Text("+ New Scratch Nsite", color = BreDeepPink) },
+                                text = {
+                                    Text(
+                                        text = "+ New from Template (Music / Books / Blogs / Videos)",
+                                        color = BreDeepPink,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                },
                                 onClick = {
                                     projectMenuExpanded = false
                                     showNewProjectDialog = true
@@ -952,25 +960,99 @@ fun CreatorStudioScreen(
     }
 
     if (showNewProjectDialog) {
+        var selectedTemplate by remember { mutableStateOf(NsiteTemplateKind.BLANK) }
         var newTitle by remember { mutableStateOf("") }
         var newSlug by remember { mutableStateOf("") }
         AlertDialog(
             onDismissRequest = { showNewProjectDialog = false },
             containerColor = BreGray850,
-            title = { Text("Create New Multi-File Nsite", color = ZineBoneCream) },
+            title = { Text("Create New Multi-File Nsite", color = ZineBoneCream, fontWeight = FontWeight.Black) },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "CHOOSE STARTER TEMPLATE",
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Black),
+                        color = BreLightPink
+                    )
+                    NsiteTemplateKind.entries.forEach { tpl ->
+                        val isSelected = selectedTemplate == tpl
+                        Surface(
+                            onClick = {
+                                selectedTemplate = tpl
+                                if (newSlug.isBlank() || NsiteTemplateKind.entries.any { it.defaultSlug == newSlug }) {
+                                    newSlug = tpl.defaultSlug
+                                }
+                            },
+                            shape = RoundedCornerShape(10.dp),
+                            color = if (isSelected) BrePinkDark3 else BreBlack,
+                            border = BorderStroke(
+                                width = if (isSelected) 1.5.dp else 1.dp,
+                                color = if (isSelected) BreDeepPink else ObsidianBorder
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 48.dp)
+                                .testTag("template_option_${tpl.id}")
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Text(text = tpl.iconGlyph, fontSize = 18.sp)
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = tpl.label,
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = if (isSelected) ZineBoneCream else BreWhite,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = tpl.subtitle,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = BreGray100,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                if (isSelected) {
+                                    Icon(
+                                        imageVector = Icons.Default.CheckCircle,
+                                        contentDescription = "Selected template",
+                                        tint = BreDeepPink,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(4.dp))
                     OutlinedTextField(
                         value = newTitle,
                         onValueChange = { newTitle = it },
                         label = { Text("Project Title") },
-                        singleLine = true
+                        placeholder = { Text(selectedTemplate.label) },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("new_project_title_input")
                     )
                     OutlinedTextField(
                         value = newSlug,
                         onValueChange = { newSlug = it },
-                        label = { Text("Slug (1-13 chars, e.g. my-arcade)") },
-                        singleLine = true
+                        label = { Text("Slug (1-13 chars, e.g. ${selectedTemplate.defaultSlug})") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("new_project_slug_input")
                     )
                 }
             },
@@ -978,12 +1060,16 @@ fun CreatorStudioScreen(
                 TextButton(
                     onClick = {
                         showNewProjectDialog = false
+                        val finalTitle = newTitle.ifBlank { selectedTemplate.label }
+                        val finalSlug = newSlug.ifBlank { newTitle.ifBlank { selectedTemplate.defaultSlug } }
                         onCreateScratchProject(
-                            newTitle.ifBlank { "Untitled Nsite" },
-                            newSlug.ifBlank { newTitle.ifBlank { "site" } },
-                            NostrKinds.NSITE_NAMED
+                            finalTitle,
+                            finalSlug,
+                            NostrKinds.NSITE_NAMED,
+                            selectedTemplate
                         )
-                    }
+                    },
+                    modifier = Modifier.testTag("confirm_create_project_btn")
                 ) {
                     Text("Create", color = BreDeepPink, fontWeight = FontWeight.Bold)
                 }

@@ -18,6 +18,7 @@ import com.example.data.ManagedRelayItem
 import com.example.data.NoteEntity
 import com.example.data.NsiteProjectEntity
 import com.example.data.NsiteProjectFileEntity
+import com.example.data.NsiteTemplateKind
 import com.example.data.NsiteVersionEntity
 import com.example.data.PublishDeploymentReport
 import com.example.data.PublishVerificationBreakdown
@@ -440,7 +441,12 @@ class ShellViewModel @JvmOverloads constructor(
         _selectedFilePath.value = relativePath
     }
 
-    fun createNewScratchProject(title: String, dTag: String, targetKind: Int = NostrKinds.NSITE_NAMED) {
+    fun createNewScratchProject(
+        title: String,
+        dTag: String,
+        targetKind: Int = NostrKinds.NSITE_NAMED,
+        templateKind: NsiteTemplateKind = NsiteTemplateKind.BLANK
+    ) {
         viewModelScope.launch {
             _isWorking.value = true
             runCatching {
@@ -449,14 +455,15 @@ class ShellViewModel @JvmOverloads constructor(
                     ownerPubkeyHex = owner,
                     title = title,
                     dTag = dTag,
-                    targetKind = targetKind
+                    targetKind = targetKind,
+                    templateKind = templateKind
                 )
             }.onSuccess { proj ->
                 _activeProjectId.value = proj.projectId
                 _selectedFilePath.value = proj.entryPath
                 _latestDeployment.value = null
                 _latestPublishVerification.value = null
-                showBanner("Created multi-file project '${proj.title}'")
+                showBanner("Created ${templateKind.label} project '${proj.title}'")
             }.onFailure { err ->
                 showBanner(err.message ?: "Could not create project", isError = true)
             }
@@ -828,8 +835,26 @@ class ShellViewModel @JvmOverloads constructor(
         viewModelScope.launch {
             _isWorking.value = true
             runCatching { repository.probeAllNetworkHealth() }
-                .onSuccess { showBanner("Probed NIP-11 relay capabilities & Blossom BUD-01/02 health") }
+                .onSuccess { summary ->
+                    showBanner(
+                        "Mesh probed • ${summary.healthyCount} healthy • +${summary.discoveredUrls.size} discovered • -${summary.droppedUrls.size} dead"
+                    )
+                }
                 .onFailure { showBanner(it.message ?: "Network probe error", isError = true) }
+            _isWorking.value = false
+        }
+    }
+
+    fun maintainRelaysAutoDiscoverAndDropDead() {
+        viewModelScope.launch {
+            _isWorking.value = true
+            runCatching { repository.maintainRelaysAutoDiscoverAndDropDead() }
+                .onSuccess { s ->
+                    showBanner(
+                        "Relays: +${s.discoveredUrls.size} discovered • ${s.droppedUrls.size} dead dropped (${s.closedSocketUrls.size} closed) • ${s.healthyCount} healthy"
+                    )
+                }
+                .onFailure { showBanner(it.message ?: "Relay hygiene error", isError = true) }
             _isWorking.value = false
         }
     }

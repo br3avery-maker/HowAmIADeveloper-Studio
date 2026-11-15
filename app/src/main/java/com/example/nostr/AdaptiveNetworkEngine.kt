@@ -13,22 +13,40 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.net.URI
+import java.util.concurrent.ConcurrentHashMap
 
 enum class NetworkOperationType {
     DISCOVER_NSITES,
     RESOLVE_MANIFEST,
     PUBLISH_MANIFEST,
+    FETCH_METADATA,
+    PUBLISH_NOTE,
     UPLOAD_BLOB,
     RETRIEVE_BLOB
 }
 
+data class AuthorRelayPreferences(
+    val writeRelays: List<String>,
+    val readRelays: List<String>,
+    val updatedAtSec: Long
+)
+
+data class RelayMaintenanceSummary(
+    val discoveredUrls: List<String>,
+    val droppedUrls: List<String>,
+    val closedSocketUrls: List<String>,
+    val probedCount: Int,
+    val healthyCount: Int
+)
+
 /**
  * Shared Adaptive Relay + Blossom Networking Engine.
  *
- * - Discovers and probes Nostr relays (NIP-11, NIP-65) and Blossom servers (BUD-01/02, Kind 10063).
- * - Scores and selects destinations per operation using latency, capability flags, and
- *   time-decayed failure telemetry so temporary glitches never become permanent bans.
- * - Distinguishes `CONNECTED`, `ACCEPTED`, `PERSISTED`, and `VERIFIED_RETRIEVAL`.
+ * - Discovers and probes Nostr relays (NIP-11, NIP-65, naddr/manifest hints) and Blossom servers.
+ * - Actively drops dead, errored, stalled-connecting, or idle ephemeral connections.
+ * - Targets relevant relays per operation using NIP-65 outbox/inbox roles, NIP-11 capabilities,
+ *   domain affinity, and time-decayed failure telemetry.
  * - Enforces Blossom upload verification (requiring >= 1 verified server) and mirrors blobs
  *   to backup servers for content redundancy and recovery.
  */
@@ -38,6 +56,10 @@ class AdaptiveNetworkEngine(
     val blossomClient: BlossomClient,
     private val engineScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 ) {
+    private val authorNip65Cache = ConcurrentHashMap<String, AuthorRelayPreferences>()
+    private val discoveredCandidates = ConcurrentHashMap<String, String>()
+    private val lastProbeAttemptMs = ConcurrentHashMap<String, Long>()
+
     init {
         relayPool.healthObserver = { url, success, latencyMs, errorReason ->
             engineScope.launch {
@@ -61,6 +83,47 @@ class AdaptiveNetworkEngine(
                     latencyMs = latencyMs,
                     statusMessage = msg
                 )
+            }
+        }
+    }
+
+    fun recordAuthorNip65Relays(
+        pubkeyHex: String,
+        writeRelays: List<String>,
+        readRelays: List<String>,
+        createdAtSec: Long
+    ) {
+        val pk = pubkeyHex.trim().lowercase()
+        if (pk.length != 64) return
+        val existing = authorNip65Cache[pk]
+        if (existing != null && createdAtSec < existing.updatedAtSec) return
+
+        val cleanWrite = writeRelays.map { RelayPoolClient.normalizeRelayUrl(it) }
+            .filter { isAutoDiscoverableRelayUrl(it) || it.startsWith("ws://127.0.0.1") }
+            .distinct()
+        val cleanRead = readRelays.map { RelayPoolClient.normalizeRelayUrl(it) }
+            .filter { isAutoDiscoverableRelayUrl(it) || it.startsWith("ws://127.0.0.1") }
+            .distinct()
+
+        authorNip65Cache[pk] = AuthorRelayPreferences(
+            writeRelays = cleanWrite,
+            readRelays = cleanRead,
+            updatedAtSec = createdAtSec
+        )
+        recordRelayHints(cleanWrite + cleanRead, "NIP-65:${pk.take(8)}")
+    }
+
+    fun getAuthorWriteRelays(pubkeyHex: String): List<String> =
+        authorNip65Cache[pubkeyHex.trim().lowercase()]?.writeRelays.orEmpty()
+
+    fun getAuthorReadRelays(pubkeyHex: String): List<String> =
+        authorNip65Cache[pubkeyHex.trim().lowercase()]?.readRelays.orEmpty()
+
+    fun recordRelayHints(urls: Collection<String>, source: String = "hint") {
+        urls.forEach { raw ->
+            val clean = RelayPoolClient.normalizeRelayUrl(raw)
+            if (isAutoDiscoverableRelayUrl(clean)) {
+                discoveredCandidates.putIfAbsent(clean, source)
             }
         }
     }
@@ -97,19 +160,25 @@ class AdaptiveNetworkEngine(
 
     suspend fun probeAllConfiguredEndpoints() = withContext(Dispatchers.IO) {
         val relays = dao.getRelaysList()
-        relays.forEach { r ->
-            probeRelayCapabilities(r.url)
+        coroutineScope {
+            relays.map { r ->
+                async { probeRelayCapabilities(r.url) }
+            }.awaitAll()
         }
         val servers = dao.getBlossomServersList()
-        servers.forEach { s ->
-            probeBlossomCapabilities(s.serverUrl)
+        coroutineScope {
+            servers.map { s ->
+                async { probeBlossomCapabilities(s.serverUrl) }
+            }.awaitAll()
         }
     }
 
     suspend fun probeRelayCapabilities(rawUrl: String): RelayHealthEntity? = withContext(Dispatchers.IO) {
         val url = RelayPoolClient.normalizeRelayUrl(rawUrl)
         if (url.isBlank()) return@withContext null
+        val startMs = System.currentTimeMillis()
         val nip11 = relayPool.probeRelayNip11(url)
+        val probeElapsedMs = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
         val now = System.currentTimeMillis()
         val prev = dao.getRelayHealth(url) ?: RelayHealthEntity(url = url)
         val updated = if (nip11 != null) {
@@ -122,6 +191,7 @@ class AdaptiveNetworkEngine(
                 authRequired = nip11.authRequired,
                 paymentRequired = nip11.paymentRequired,
                 maxMessageBytes = nip11.maxMessageLength,
+                avgLatencyMs = blendLatency(prev.avgLatencyMs, probeElapsedMs),
                 lastProbedAt = now
             )
         } else {
@@ -154,42 +224,245 @@ class AdaptiveNetworkEngine(
         }
 
     /**
-     * Ranks relays for the requested operation. Temporary failures decay over a 2-minute half-life
-     * so transient network drops never permanently exclude a relay.
+     * Ranks and filters relays specifically relevant to [operation], combining:
+     * - NIP-65 author write relays (outbox) for querying/publishing author events
+     * - NIP-65 recipient read relays (inbox) for targeting notes/mentions
+     * - NIP-11 capability flags (NIP-50 search, NIP-65, auth/payment gating)
+     * - Domain specialization (Nsite relays vs metadata indexers vs general relays)
+     * - Time-decayed failure telemetry, dropping dead relays when healthy ones exist.
      */
     suspend fun selectRelaysForOperation(
         operation: NetworkOperationType,
         extraCandidateRelays: List<String> = emptyList(),
-        hasActiveSigner: Boolean = true
+        targetAuthorPubkeys: Collection<String> = emptyList(),
+        mentionedPubkeys: Collection<String> = emptyList(),
+        hasActiveSigner: Boolean = true,
+        limit: Int = 8
     ): List<String> = withContext(Dispatchers.IO) {
         val configured: List<RelayEntity> = dao.getRelaysList()
         val healthMap = dao.getAllRelayHealth().associateBy { it.url }
         val liveMap = relayPool.relayStatuses.value
         val now = System.currentTimeMillis()
 
-        val candidates = buildList {
+        val authorWriteSet = buildSet {
+            targetAuthorPubkeys.forEach { pk ->
+                getAuthorWriteRelays(pk).forEach { add(it) }
+            }
+        }
+        val mentionedReadSet = buildSet {
+            mentionedPubkeys.forEach { pk ->
+                getAuthorReadRelays(pk).forEach { add(it) }
+            }
+        }
+        val extraSet = extraCandidateRelays
+            .map { RelayPoolClient.normalizeRelayUrl(it) }
+            .filter { it.startsWith("wss://") || it.startsWith("ws://") }
+            .toSet()
+
+        val rawCandidates = buildList {
             configured.forEach { entity ->
                 val allowed = when (operation) {
-                    NetworkOperationType.PUBLISH_MANIFEST -> entity.writeEnabled
+                    NetworkOperationType.PUBLISH_MANIFEST,
+                    NetworkOperationType.PUBLISH_NOTE -> entity.writeEnabled
                     else -> entity.readEnabled
                 }
                 if (allowed) add(entity.url)
             }
-            extraCandidateRelays.map { RelayPoolClient.normalizeRelayUrl(it) }
-                .filter { it.isNotBlank() }
-                .forEach { add(it) }
+            addAll(authorWriteSet)
+            if (operation == NetworkOperationType.PUBLISH_NOTE) {
+                addAll(mentionedReadSet)
+            }
+            addAll(extraSet)
         }.distinct()
 
-        candidates.sortedByDescending { url ->
-            scoreRelay(
-                url = url,
-                health = healthMap[url],
-                live = liveMap[url],
-                operation = operation,
-                hasActiveSigner = hasActiveSigner,
-                nowMs = now
-            )
+        val nonDead = rawCandidates.filter { url ->
+            !isRelayDead(healthMap[url], liveMap[url], now)
         }
+        val effectivePool = nonDead.ifEmpty { rawCandidates }
+
+        effectivePool
+            .sortedByDescending { url ->
+                scoreRelay(
+                    url = url,
+                    health = healthMap[url],
+                    live = liveMap[url],
+                    operation = operation,
+                    hasActiveSigner = hasActiveSigner,
+                    nowMs = now,
+                    isTargetAuthorOutbox = url in authorWriteSet,
+                    isMentionedInbox = url in mentionedReadSet,
+                    isExplicitHint = url in extraSet
+                )
+            }
+            .take(limit.coerceAtLeast(1))
+    }
+
+    /**
+     * Drops persistently dead/failing relays from the active pool and closes hung, errored,
+     * or idle ephemeral WebSocket connections via [RelayPoolClient.dropDeadConnections].
+     */
+    suspend fun dropDeadRelaysAndConnections(
+        minKeepRelays: Int = 2,
+        nowMs: Long = System.currentTimeMillis()
+    ): Pair<List<String>, List<String>> = withContext(Dispatchers.IO) {
+        val configured = dao.getRelaysList()
+        val healthMap = dao.getAllRelayHealth().associateBy { it.url }
+        val liveMap = relayPool.relayStatuses.value
+
+        val deadCandidates = configured
+            .mapNotNull { entity ->
+                val health = healthMap[entity.url]
+                val live = liveMap[entity.url]
+                if (isRelayDead(health, live, nowMs)) {
+                    val severity = (health?.consecutiveFailures ?: 0) * 10 +
+                        if (live?.status == RelayConnectionStatus.ERROR) 5 else 0
+                    entity.url to severity
+                } else {
+                    null
+                }
+            }
+            .sortedByDescending { it.second }
+            .map { it.first }
+
+        val maxDroppable = (configured.size - minKeepRelays).coerceAtLeast(0)
+        val droppedConfigured = deadCandidates.take(maxDroppable)
+
+        val dropReport = relayPool.dropDeadConnections(
+            explicitDeadUrls = droppedConfigured.toSet(),
+            nowMs = nowMs
+        )
+
+        droppedConfigured.forEach { url ->
+            dao.deleteRelay(url)
+            relayPool.disconnectRelay(url, removeFromMap = true)
+        }
+
+        val allClosed = (dropReport.closedSockets + dropReport.expiredEphemeral).distinct()
+        droppedConfigured to allClosed
+    }
+
+    /**
+     * Auto-discovers healthy Nostr relays from incoming NIP-65 relay lists, manifest/naddr hints,
+     * and curated bootstrap candidates. Validates URLs, probes NIP-11 / WebSocket handshakes,
+     * filters out payment-gated or unreachable nodes, and adopts responsive relays up to [maxConfiguredCap].
+     */
+    suspend fun autoDiscoverAndAdoptRelays(
+        extraCandidates: Collection<String> = emptyList(),
+        maxConfiguredCap: Int = 10,
+        maxProbesPerPass: Int = 6
+    ): List<String> = withContext(Dispatchers.IO) {
+        recordRelayHints(extraCandidates, "manual-hint")
+        val configured = dao.getRelaysList()
+        val configuredSet = configured.map { it.url }.toSet()
+        val availableSlots = (maxConfiguredCap - configured.size).coerceAtLeast(0)
+        if (availableSlots == 0) return@withContext emptyList()
+
+        val healthMap = dao.getAllRelayHealth().associateBy { it.url }
+        val liveMap = relayPool.relayStatuses.value
+        val now = System.currentTimeMillis()
+
+        val poolCandidates = buildList {
+            extraCandidates.map { RelayPoolClient.normalizeRelayUrl(it) }.forEach { add(it) }
+            addAll(discoveredCandidates.keys)
+            authorNip65Cache.values.forEach { pref ->
+                addAll(pref.writeRelays)
+                addAll(pref.readRelays)
+            }
+            if (configured.size < 6) {
+                addAll(AUTO_DISCOVERY_FALLBACK_RELAYS)
+            }
+        }
+            .filter { url ->
+                isAutoDiscoverableRelayUrl(url) &&
+                    url !in configuredSet &&
+                    !isRelayDead(healthMap[url], liveMap[url], now) &&
+                    (now - (lastProbeAttemptMs[url] ?: 0L)) >= 180_000L
+            }
+            .distinct()
+            .take(maxProbesPerPass)
+
+        if (poolCandidates.isEmpty()) return@withContext emptyList()
+
+        val probeResults = coroutineScope {
+            poolCandidates.map { candidateUrl ->
+                async {
+                    lastProbeAttemptMs[candidateUrl] = System.currentTimeMillis()
+                    val nip11Health = probeRelayCapabilities(candidateUrl)
+                    val nip11Ok = nip11Health != null &&
+                        nip11Health.lastProbedAt > 0L &&
+                        (nip11Health.supportedNipsCsv.isNotBlank() || nip11Health.softwareInfo.isNotBlank())
+                    if (nip11Health?.paymentRequired == true) {
+                        return@async null
+                    }
+                    val wsReady = if (nip11Ok) {
+                        true
+                    } else {
+                        // Some valid Nostr relays (or local dev relays) don't serve NIP-11 JSON — test WS handshake
+                        relayPool.connectRelay(candidateUrl, isEphemeralOutbox = true)
+                        val ok = relayPool.awaitSocketReady(candidateUrl, timeoutMs = 1300L)
+                        if (!ok) {
+                            relayPool.disconnectRelay(candidateUrl, removeFromMap = true)
+                        }
+                        ok
+                    }
+                    if (wsReady) {
+                        candidateUrl
+                    } else {
+                        recordRelayOutcome(
+                            rawUrl = candidateUrl,
+                            success = false,
+                            verifiedPublish = false,
+                            latencyMs = null,
+                            errorReason = "Auto-discovery probe unreachable"
+                        )
+                        null
+                    }
+                }
+            }.awaitAll().filterNotNull()
+        }
+
+        val adopted = probeResults.take(availableSlots)
+        adopted.forEach { newUrl ->
+            dao.upsertRelay(RelayEntity(url = newUrl))
+            relayPool.connectRelay(newUrl, isEphemeralOutbox = false)
+        }
+        adopted
+    }
+
+    /**
+     * Full relay hygiene cycle:
+     * 1. Drops dead/stalled relays and closes dead WebSocket connections.
+     * 2. Probes and adopts newly discovered healthy relays up to pool capacity.
+     * 3. Probes stale configured relays & Blossom mirrors.
+     */
+    suspend fun maintainRelays(
+        extraCandidates: Collection<String> = emptyList()
+    ): RelayMaintenanceSummary = withContext(Dispatchers.IO) {
+        val (droppedUrls, closedSocketUrls) = dropDeadRelaysAndConnections()
+        val discoveredUrls = autoDiscoverAndAdoptRelays(extraCandidates = extraCandidates)
+        val relays = dao.getRelaysList()
+        val now = System.currentTimeMillis()
+        val healthMap = dao.getAllRelayHealth().associateBy { it.url }
+        var probed = 0
+        relays.forEach { entity ->
+            val lastProbed = healthMap[entity.url]?.lastProbedAt ?: 0L
+            if (now - lastProbed > 120_000L) {
+                probeRelayCapabilities(entity.url)
+                probed++
+            }
+        }
+        val liveStatuses = relayPool.relayStatuses.value
+        val healthyCount = relays.count { entity ->
+            liveStatuses[entity.url]?.status == RelayConnectionStatus.CONNECTED ||
+                !isRelayDead(dao.getRelayHealth(entity.url), liveStatuses[entity.url], now)
+        }
+        RelayMaintenanceSummary(
+            discoveredUrls = discoveredUrls,
+            droppedUrls = droppedUrls,
+            closedSocketUrls = closedSocketUrls,
+            probedCount = probed,
+            healthyCount = healthyCount
+        )
     }
 
     /**
@@ -248,8 +521,8 @@ class AdaptiveNetworkEngine(
     }
 
     /**
-     * Publishes a signed Nostr event across adaptively ranked write relays, automatically
-     * handling NIP-42 `AUTH` challenges when `signEvent` is available, and performing
+     * Publishes a signed Nostr event across adaptively ranked, operation-relevant write relays,
+     * automatically handling NIP-42 `AUTH` challenges when `signEvent` is available, and performing
      * round-trip `REQ` verification to distinguish `ACCEPTED` from `VERIFIED_RETRIEVAL`.
      */
     suspend fun publishEventAdaptively(
@@ -258,10 +531,23 @@ class AdaptiveNetworkEngine(
         verifyRetrieval: Boolean = true,
         signAuthIfChallenged: (suspend (UnsignedNostrEvent) -> NostrEvent)? = null
     ): RelayPublishSummary = withContext(Dispatchers.IO) {
+        val op = if (event.kind == NostrKinds.TEXT_NOTE) {
+            NetworkOperationType.PUBLISH_NOTE
+        } else {
+            NetworkOperationType.PUBLISH_MANIFEST
+        }
+        val mentionedPubkeys = event.tags
+            .filter { it.size >= 2 && it[0] == "p" }
+            .map { it[1].trim().lowercase() }
+            .filter { it.length == 64 }
+
         val rankedRelays = selectRelaysForOperation(
-            operation = NetworkOperationType.PUBLISH_MANIFEST,
+            operation = op,
             extraCandidateRelays = extraOutboxRelays,
-            hasActiveSigner = signAuthIfChallenged != null
+            targetAuthorPubkeys = listOf(event.pubkey.lowercase()),
+            mentionedPubkeys = mentionedPubkeys,
+            hasActiveSigner = signAuthIfChallenged != null,
+            limit = 8
         )
         if (rankedRelays.isEmpty()) {
             return@withContext RelayPublishSummary(event, emptyList())
@@ -316,7 +602,7 @@ class AdaptiveNetworkEngine(
 
     /**
      * Uploads a blob enforcing the confirmed redundancy policy:
-     * - Requires at least **1 verified server** (`uploadedLive && verifiedRetrieval`, or `uploadedLive` if server is write-only CDN that passes HTTP 2xx + SHA check) before allowing manifest publication.
+     * - Requires at least **1 verified server** before allowing manifest publication.
      * - Automatically falls back across healthy servers if the primary server rejects or fails.
      * - Mirrors the blob to up to `maxBackupMirrors` secondary Blossom servers for redundancy.
      */
@@ -365,7 +651,6 @@ class AdaptiveNetworkEngine(
                 winningResult = res
                 break
             } else if (res.uploadedLive && winningResult == null) {
-                // Keep accepted upload as fallback while looking for full GET verification
                 winningResult = res
             } else {
                 failureDetails.add("${candidate.removePrefix("https://")}: ${res.statusDetail}")
@@ -381,7 +666,6 @@ class AdaptiveNetworkEngine(
             stage = DeliveryVerificationStage.FAILED
         )
 
-        // Mirror to backup servers concurrently for content redundancy
         val mirrorTargets = (mirrors + primaries)
             .filter { it != primaryWin.serverUrl }
             .distinct()
@@ -523,7 +807,54 @@ class AdaptiveNetworkEngine(
             "https://cdn.satellite.earth"
         )
 
+        val AUTO_DISCOVERY_FALLBACK_RELAYS = listOf(
+            "wss://relay.nsite.lol",
+            "wss://purplepag.es",
+            "wss://relay.damus.io",
+            "wss://nos.lol",
+            "wss://relay.primal.net",
+            "wss://relay.nostr.band",
+            "wss://offchain.pub",
+            "wss://nostr.wine"
+        )
+
         private const val TRANSIENT_DECAY_HALF_LIFE_MS = 120_000L // 2 minutes
+        private const val DEAD_RELAY_COOLDOWN_MS = 180_000L // 3 minutes
+
+        fun isAutoDiscoverableRelayUrl(rawUrl: String): Boolean {
+            val clean = RelayPoolClient.normalizeRelayUrl(rawUrl)
+            if (!clean.startsWith("wss://") && !clean.startsWith("ws://")) return false
+            if (clean.contains('#') || clean.contains(' ')) return false
+            val authority = clean.substringAfter("://").substringBefore('/')
+            if (authority.isBlank() || authority.contains('@')) return false
+            val host = authority.substringBefore(':').lowercase()
+            if (host.isBlank() || host.endsWith(".onion") || host.endsWith(".i2p")) return false
+            if (host == "example.com" || host.endsWith(".example") || host.endsWith(".invalid")) return false
+            val uri = runCatching { URI(clean) }.getOrNull() ?: return false
+            return !uri.host.isNullOrBlank()
+        }
+
+        fun isRelayDead(
+            health: RelayHealthEntity?,
+            live: RelayStatusInfo?,
+            nowMs: Long = System.currentTimeMillis()
+        ): Boolean {
+            if (live?.status == RelayConnectionStatus.CONNECTED) return false
+            if (health == null) {
+                return live?.status == RelayConnectionStatus.ERROR
+            }
+            val recentFailure = health.lastFailureAt > 0L && (nowMs - health.lastFailureAt) < DEAD_RELAY_COOLDOWN_MS
+            if (health.consecutiveFailures >= 3 && (recentFailure || live?.status == RelayConnectionStatus.ERROR)) {
+                return true
+            }
+            if (live?.status == RelayConnectionStatus.ERROR && health.consecutiveFailures >= 2) {
+                return true
+            }
+            if (health.failureCount >= 4 && health.successCount == 0 && live?.status != RelayConnectionStatus.CONNECTING) {
+                return true
+            }
+            return false
+        }
 
         internal fun decayedPenalty(consecutiveFailures: Int, lastFailureAt: Long, nowMs: Long): Double {
             if (consecutiveFailures <= 0 || lastFailureAt <= 0L) return 0.0
@@ -539,16 +870,73 @@ class AdaptiveNetworkEngine(
             live: RelayStatusInfo?,
             operation: NetworkOperationType,
             hasActiveSigner: Boolean,
-            nowMs: Long
+            nowMs: Long,
+            isTargetAuthorOutbox: Boolean = false,
+            isMentionedInbox: Boolean = false,
+            isExplicitHint: Boolean = false
         ): Double {
             var score = 100.0
             if (live?.status == RelayConnectionStatus.CONNECTED) score += 35.0
-            if (url.contains("nsite", ignoreCase = true) &&
-                (operation == NetworkOperationType.DISCOVER_NSITES || operation == NetworkOperationType.PUBLISH_MANIFEST)
+            else if (live?.status == RelayConnectionStatus.ERROR) score -= 45.0
+
+            // Role-targeted affinity (NIP-65 outbox / inbox / explicit naddr hints)
+            if (isTargetAuthorOutbox &&
+                (operation == NetworkOperationType.RESOLVE_MANIFEST ||
+                    operation == NetworkOperationType.FETCH_METADATA ||
+                    operation == NetworkOperationType.DISCOVER_NSITES ||
+                    operation == NetworkOperationType.PUBLISH_MANIFEST ||
+                    operation == NetworkOperationType.PUBLISH_NOTE)
             ) {
-                score += 20.0
+                score += 55.0
             }
+            if (isMentionedInbox && operation == NetworkOperationType.PUBLISH_NOTE) {
+                score += 52.0
+            }
+            if (isExplicitHint) {
+                score += 25.0
+            }
+
+            // Domain specialization by operation
+            val lowerUrl = url.lowercase()
+            when (operation) {
+                NetworkOperationType.DISCOVER_NSITES,
+                NetworkOperationType.RESOLVE_MANIFEST -> {
+                    if ("nsite" in lowerUrl) score += 28.0
+                    if ("damus" in lowerUrl || "nos.lol" in lowerUrl || "primal" in lowerUrl) score += 12.0
+                }
+                NetworkOperationType.FETCH_METADATA -> {
+                    if ("purplepag.es" in lowerUrl || "nostr.band" in lowerUrl || "primal" in lowerUrl) {
+                        score += 35.0
+                    }
+                }
+                NetworkOperationType.PUBLISH_MANIFEST -> {
+                    if ("nsite" in lowerUrl) score += 28.0
+                }
+                NetworkOperationType.PUBLISH_NOTE -> {
+                    if ("damus" in lowerUrl || "nos.lol" in lowerUrl || "primal" in lowerUrl || "offchain" in lowerUrl) {
+                        score += 20.0
+                    }
+                    if ("purplepag.es" in lowerUrl) score -= 25.0 // Profile indexer, not general Kind 1
+                }
+                else -> Unit
+            }
+
             if (health != null) {
+                val nips = health.supportedNipsCsv
+                    .split(',')
+                    .mapNotNull { it.trim().toIntOrNull() }
+                    .toSet()
+
+                if (operation == NetworkOperationType.DISCOVER_NSITES && 50 in nips) {
+                    score += 15.0 // NIP-50 search relay helps discovery
+                }
+                if (operation == NetworkOperationType.FETCH_METADATA && (11 in nips || 65 in nips)) {
+                    score += 10.0
+                }
+                if (operation == NetworkOperationType.PUBLISH_MANIFEST && (33 in nips || 11 in nips)) {
+                    score += 8.0
+                }
+
                 val total = health.successCount + health.failureCount
                 if (total > 0) {
                     score += (health.successCount.toDouble() / total.toDouble()) * 30.0
@@ -557,8 +945,10 @@ class AdaptiveNetworkEngine(
                 if (health.avgLatencyMs > 0L) {
                     score -= (health.avgLatencyMs.coerceAtMost(3000L) / 150.0)
                 }
-                if (health.paymentRequired && operation == NetworkOperationType.PUBLISH_MANIFEST) {
-                    score -= 60.0
+                if (health.paymentRequired &&
+                    (operation == NetworkOperationType.PUBLISH_MANIFEST || operation == NetworkOperationType.PUBLISH_NOTE)
+                ) {
+                    score -= 80.0
                 }
                 if (health.authRequired && !hasActiveSigner) {
                     score -= 50.0
@@ -582,7 +972,6 @@ class AdaptiveNetworkEngine(
                 if (health.avgLatencyMs > 0L) {
                     score -= (health.avgLatencyMs.coerceAtMost(4000L) / 200.0)
                 }
-                // Hash mismatches are integrity violations and receive a strong penalty
                 score -= (health.hashMismatchCount * 45.0)
                 score -= decayedPenalty(health.consecutiveFailures, health.lastFailureAt, nowMs)
             }
@@ -595,3 +984,4 @@ class AdaptiveNetworkEngine(
         }
     }
 }
+

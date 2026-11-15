@@ -5,11 +5,15 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.ConfiguredBlossomServerEntity
 import com.example.data.LauncherPreferencesRepository
+import com.example.data.NsiteTemplateKind
 import com.example.data.RelayEntity
+import com.example.data.RelayHealthEntity
 import com.example.data.ShellDatabase
 import com.example.data.ShellRepository
+import com.example.nostr.AdaptiveNetworkEngine
 import com.example.nostr.BlossomClient
 import com.example.nostr.KeyVaultManager
+import com.example.nostr.NetworkOperationType
 import com.example.nostr.NostrCrypto
 import com.example.nostr.NostrEvent
 import com.example.nostr.NostrKinds
@@ -566,6 +570,276 @@ class SovereignShellIntegrationTest {
             assertTrue("Adaptive Blossom health telemetry must persist across restart", blossomHealthAfterRestart.isNotEmpty())
         } finally {
             db2.close()
+        }
+    }
+
+    @Test
+    fun relayAutoDiscovery_nip65RoleTargeting_andDropDeadConnections_workEndToEnd() = runBlocking {
+        // 1. URL validation gate for auto-discovery
+        assertTrue(AdaptiveNetworkEngine.isAutoDiscoverableRelayUrl("wss://relay.damus.io"))
+        assertTrue(AdaptiveNetworkEngine.isAutoDiscoverableRelayUrl("ws://127.0.0.1:4848"))
+        assertFalse(AdaptiveNetworkEngine.isAutoDiscoverableRelayUrl("wss://hiddenservice1234.onion"))
+        assertFalse(AdaptiveNetworkEngine.isAutoDiscoverableRelayUrl("wss://peer.i2p"))
+        assertFalse(AdaptiveNetworkEngine.isAutoDiscoverableRelayUrl("wss://user:pass@relay.example.org"))
+        assertFalse(AdaptiveNetworkEngine.isAutoDiscoverableRelayUrl("wss://relay.damus.io/#frag"))
+        assertFalse(AdaptiveNetworkEngine.isAutoDiscoverableRelayUrl("wss://example.com"))
+
+        val db = Room.inMemoryDatabaseBuilder(context, ShellDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        val liveDiscoveredRelay = EmbeddedNostrRelayServer().apply { start() }
+        // Allocate and immediately close a port so it is guaranteed unreachable
+        val deadPort = ServerSocket(0).use { it.localPort }
+
+        try {
+            val dao = db.shellDao()
+            val repo = buildRepository(db)
+
+            // 2. NIP-65 Kind 10002 parsing -> writeRelays (outbox) vs readRelays (inbox)
+            val authorKeys = NostrCrypto.generateKeyPair()
+            val recipientKeys = NostrCrypto.generateKeyPair()
+
+            val authorOutboxUrl = "wss://outbox.author.test"
+            val authorSharedUrl = "wss://shared.author.test"
+            val authorInboxOnlyUrl = "wss://inbox.author.test"
+            val recipientInboxUrl = "wss://inbox.recipient.test"
+
+            val authorNip65 = NostrEvent.createAndSign(
+                privKeyHex = authorKeys.privKeyHex,
+                kind = NostrKinds.RELAY_LIST,
+                content = "",
+                tags = listOf(
+                    listOf("r", authorOutboxUrl, "write"),
+                    listOf("r", authorSharedUrl),
+                    listOf("r", authorInboxOnlyUrl, "read")
+                ),
+                createdAt = 1_760_000_000L
+            )
+            val recipientNip65 = NostrEvent.createAndSign(
+                privKeyHex = recipientKeys.privKeyHex,
+                kind = NostrKinds.RELAY_LIST,
+                content = "",
+                tags = listOf(
+                    listOf("r", recipientInboxUrl, "read"),
+                    listOf("r", "wss://outbox.recipient.test", "write")
+                ),
+                createdAt = 1_760_000_000L
+            )
+            repo.ingestNostrEvent(authorNip65)
+            repo.ingestNostrEvent(recipientNip65)
+
+            assertEquals(
+                listOf(authorOutboxUrl, authorSharedUrl),
+                repo.networkEngine.getAuthorWriteRelays(authorKeys.pubKeyHex)
+            )
+            assertEquals(
+                listOf(authorSharedUrl, authorInboxOnlyUrl),
+                repo.networkEngine.getAuthorReadRelays(authorKeys.pubKeyHex)
+            )
+            assertEquals(
+                listOf(recipientInboxUrl),
+                repo.networkEngine.getAuthorReadRelays(recipientKeys.pubKeyHex)
+            )
+
+            // 3. Operation-specific relay targeting
+            val nsiteRelay = "wss://relay.nsite.lol"
+            val indexerRelay = "wss://purplepag.es"
+            val noteRelay = "wss://relay.damus.io"
+            val searchRelay = "wss://search.nostr.test"
+            val paidRelay = "wss://paid.relay.test"
+
+            listOf(nsiteRelay, indexerRelay, noteRelay, searchRelay, paidRelay).forEach { u ->
+                dao.upsertRelay(RelayEntity(url = u, readEnabled = true, writeEnabled = true))
+            }
+            dao.upsertRelayHealth(
+                RelayHealthEntity(
+                    url = searchRelay,
+                    supportedNipsCsv = "1,11,50",
+                    successCount = 5
+                )
+            )
+            dao.upsertRelayHealth(RelayHealthEntity(url = nsiteRelay, successCount = 5))
+            dao.upsertRelayHealth(RelayHealthEntity(url = indexerRelay, supportedNipsCsv = "1,11", successCount = 5))
+            dao.upsertRelayHealth(RelayHealthEntity(url = noteRelay, successCount = 5))
+            dao.upsertRelayHealth(
+                RelayHealthEntity(
+                    url = paidRelay,
+                    paymentRequired = true,
+                    successCount = 2
+                )
+            )
+
+            // DISCOVER_NSITES prefers relay.nsite.lol and NIP-50 search relays
+            val discoverSelected = repo.networkEngine.selectRelaysForOperation(
+                operation = NetworkOperationType.DISCOVER_NSITES,
+                limit = 4
+            )
+            assertTrue("Expected $nsiteRelay in $discoverSelected", nsiteRelay in discoverSelected)
+            assertTrue("Expected $searchRelay in $discoverSelected", searchRelay in discoverSelected)
+
+            // FETCH_METADATA prioritizes purplepag.es & target author outbox write relays
+            val metadataSelected = repo.networkEngine.selectRelaysForOperation(
+                operation = NetworkOperationType.FETCH_METADATA,
+                targetAuthorPubkeys = listOf(authorKeys.pubKeyHex),
+                limit = 4
+            )
+            assertTrue("Expected $authorOutboxUrl in $metadataSelected", authorOutboxUrl in metadataSelected)
+            assertTrue("Expected $indexerRelay in $metadataSelected", indexerRelay in metadataSelected)
+
+            // PUBLISH_NOTE targets recipient's NIP-65 read relay & general relays, penalizing purplepag.es & paidRelay
+            val publishNoteSelected = repo.networkEngine.selectRelaysForOperation(
+                operation = NetworkOperationType.PUBLISH_NOTE,
+                targetAuthorPubkeys = listOf(authorKeys.pubKeyHex),
+                mentionedPubkeys = listOf(recipientKeys.pubKeyHex),
+                limit = 5
+            )
+            assertTrue("Expected $recipientInboxUrl in $publishNoteSelected", recipientInboxUrl in publishNoteSelected)
+            assertTrue("Expected $authorOutboxUrl in $publishNoteSelected", authorOutboxUrl in publishNoteSelected)
+            assertFalse("Paid relay should be excluded from $publishNoteSelected", paidRelay in publishNoteSelected)
+            assertFalse("Metadata indexer should be deprioritized for notes: $publishNoteSelected", indexerRelay in publishNoteSelected)
+
+            // 4. Dead relay detection & pruning while preserving minKeepRelays = 2
+            val nowMs = System.currentTimeMillis()
+            val deadRelayA = "wss://dead-alpha.invalid"
+            val deadRelayB = "wss://dead-beta.invalid"
+            dao.upsertRelay(RelayEntity(url = deadRelayA))
+            dao.upsertRelay(RelayEntity(url = deadRelayB))
+            dao.upsertRelayHealth(
+                RelayHealthEntity(
+                    url = deadRelayA,
+                    consecutiveFailures = 4,
+                    failureCount = 5,
+                    lastFailureAt = nowMs - 5_000L
+                )
+            )
+            dao.upsertRelayHealth(
+                RelayHealthEntity(
+                    url = deadRelayB,
+                    consecutiveFailures = 3,
+                    failureCount = 4,
+                    lastFailureAt = nowMs - 10_000L
+                )
+            )
+
+            assertTrue(AdaptiveNetworkEngine.isRelayDead(dao.getRelayHealth(deadRelayA), null, nowMs))
+            assertFalse(AdaptiveNetworkEngine.isRelayDead(dao.getRelayHealth(searchRelay), null, nowMs))
+
+            // selectRelaysForOperation excludes dead relays when healthy ones exist
+            val activeOnly = repo.networkEngine.selectRelaysForOperation(
+                operation = NetworkOperationType.DISCOVER_NSITES,
+                limit = 12
+            )
+            assertFalse(deadRelayA in activeOnly)
+            assertFalse(deadRelayB in activeOnly)
+
+            // dropDeadRelaysAndConnections prunes both dead relays from Room
+            val (droppedUrls, _) = repo.networkEngine.dropDeadRelaysAndConnections(minKeepRelays = 2, nowMs = nowMs)
+            assertEquals(setOf(deadRelayA, deadRelayB), droppedUrls.toSet())
+            val remainingUrls = dao.getRelaysList().map { it.url }.toSet()
+            assertFalse(deadRelayA in remainingUrls)
+            assertFalse(deadRelayB in remainingUrls)
+
+            // 5. Auto-discovery against a live local WebSocket relay + unreachable dead port
+            // Trim pool below maxConfiguredCap = 10 first
+            dao.getRelaysList().drop(1).forEach { dao.deleteRelay(it.url) }
+            val liveLocalCandidate = "ws://127.0.0.1:${liveDiscoveredRelay.port}"
+            val deadLocalCandidate = "ws://127.0.0.1:$deadPort"
+            val adopted = repo.networkEngine.autoDiscoverAndAdoptRelays(
+                extraCandidates = listOf(liveLocalCandidate, deadLocalCandidate),
+                maxConfiguredCap = 6,
+                maxProbesPerPass = 4
+            )
+            assertTrue(
+                "Live local relay must be discovered and adopted: adopted=$adopted",
+                liveLocalCandidate in adopted
+            )
+            assertFalse(
+                "Unreachable local port must NOT be adopted",
+                deadLocalCandidate in adopted
+            )
+            assertTrue(dao.getRelaysList().any { it.url == liveLocalCandidate })
+        } finally {
+            runCatching { liveDiscoveredRelay.close() }
+            db.close()
+        }
+    }
+
+    @Test
+    fun nsiteContentTemplates_createParseJsonAndResolvePreviewAssets_acrossAllFiveKinds() = runBlocking {
+        val db = Room.inMemoryDatabaseBuilder(context, ShellDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        try {
+            val repo = buildRepository(db)
+            val creator = repo.createNewAccount("Template Tester")
+
+            val expectedDataFiles = mapOf(
+                NsiteTemplateKind.BLANK to Pair(null, null),
+                NsiteTemplateKind.MUSIC to Pair("/data/tracks.json", "tracks"),
+                NsiteTemplateKind.BOOKS to Pair("/data/chapters.json", "chapters"),
+                NsiteTemplateKind.BLOGS to Pair("/data/posts.json", "posts"),
+                NsiteTemplateKind.VIDEOS to Pair("/data/videos.json", "videos")
+            )
+
+            for (templateKind in NsiteTemplateKind.entries) {
+                val rawTitle = "Chaos <${templateKind.label}> & Co"
+                val project = repo.projectRepository.createScratchProject(
+                    ownerPubkeyHex = creator.pubkeyHex,
+                    title = rawTitle,
+                    dTag = "${templateKind.id}-starter",
+                    targetKind = NostrKinds.NSITE_NAMED,
+                    templateKind = templateKind
+                )
+                val files = db.shellDao().getProjectFilesList(project.projectId)
+                val byPath = files.associateBy { it.relativePath }
+
+                assertTrue("/index.html missing for $templateKind", byPath.containsKey("/index.html"))
+                assertTrue("/css/style.css missing for $templateKind", byPath.containsKey("/css/style.css"))
+                assertTrue("No JS file generated for $templateKind", files.any { it.relativePath.endsWith(".js") })
+
+                // Preview asset resolution for /index.html
+                val indexAsset = repo.projectRepository.resolveProjectPreviewAsset(
+                    projectId = project.projectId,
+                    rawPath = "/index.html",
+                    isMainFrame = true,
+                    transformRootHtml = { it }
+                )
+                assertNotNull(indexAsset)
+                assertEquals("text/html", indexAsset!!.mimeType)
+                val htmlText = String(indexAsset.bytes, Charsets.UTF_8)
+                assertTrue("<!DOCTYPE html> must lead $templateKind", htmlText.startsWith("<!DOCTYPE html>"))
+                assertTrue("HTML title must be escaped", htmlText.contains("&lt;") && htmlText.contains("&amp;"))
+
+                val cssAsset = repo.projectRepository.resolveProjectPreviewAsset(
+                    projectId = project.projectId,
+                    rawPath = "/css/style.css",
+                    isMainFrame = false,
+                    transformRootHtml = { it }
+                )
+                assertEquals("text/css", cssAsset?.mimeType)
+
+                val (jsonPath, arrayKey) = expectedDataFiles[templateKind]!!
+                if (jsonPath != null && arrayKey != null) {
+                    assertTrue("$jsonPath missing for $templateKind", byPath.containsKey(jsonPath))
+                    val jsonAsset = repo.projectRepository.resolveProjectPreviewAsset(
+                        projectId = project.projectId,
+                        rawPath = jsonPath,
+                        isMainFrame = false,
+                        transformRootHtml = { it }
+                    )
+                    assertNotNull(jsonAsset)
+                    assertEquals("application/json", jsonAsset!!.mimeType)
+                    val parsed = JSONObject(String(jsonAsset.bytes, Charsets.UTF_8))
+                    assertTrue("$arrayKey array missing in $jsonPath", parsed.has(arrayKey))
+                    assertEquals(
+                        "Template starter $jsonPath should start empty for user content",
+                        0,
+                        parsed.getJSONArray(arrayKey).length()
+                    )
+                }
+            }
+        } finally {
+            db.close()
         }
     }
 

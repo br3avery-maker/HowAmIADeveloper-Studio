@@ -316,8 +316,8 @@ fun SovereignShellRoot(
                                 latestReport = latestDeployment,
                                 latestVerification = latestPublishVerification,
                                 onSelectProject = { vm.selectProject(it) },
-                                onCreateScratchProject = { title, dTag, kind ->
-                                    vm.createNewScratchProject(title, dTag, kind)
+                                onCreateScratchProject = { title, dTag, kind, templateKind ->
+                                    vm.createNewScratchProject(title, dTag, kind, templateKind)
                                 },
                                 onDeleteProject = { vm.deleteProject(it) },
                                 onImportHtmlUri = { vm.importHtmlUri(it) },
@@ -372,6 +372,7 @@ fun SovereignShellRoot(
                                 onSetPrimaryBlossom = { vm.updateBlossomServer(it) },
                                 onRemoveBlossomServer = { vm.removeBlossomServer(it) },
                                 onProbeAllEndpoints = { vm.probeAllNetworkEndpoints() },
+                                onMaintainRelays = { vm.maintainRelaysAutoDiscoverAndDropDead() },
                                 onPublishNip65AndBlossom = { vm.publishNip65AndBlossomLists() },
                                 onOpenIdentityVault = { vm.navigateTo(ShellDestination.VaultAndAudit) },
                                 onOpenAccountMenu = { scope.launch { drawerState.open() } },
